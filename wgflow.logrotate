@@ -1,0 +1,9 @@
+/var/log/wgflow/*.jsonl {
+    daily
+    rotate 14
+    compress
+    missingok
+    notifempty
+    copytruncate
+    maxsize 100M
+}

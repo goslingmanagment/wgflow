@@ -1,0 +1,8 @@
+wgflow
+*.log
+*.jsonl
+*.db
+*.db-*
+stats.json
+.DS_Store
+._*
