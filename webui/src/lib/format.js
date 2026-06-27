@@ -134,6 +134,11 @@ export const CAT_COLORS = {
   dns: '#d29922',
   wildberries: '#d4537e',
   fansly: '#f85149',
+  vk: '#4a76a8',
+  netflix: '#c0392b',
+  spotify: '#1db954',
+  microsoft: '#17a2b8',
+  cdn: '#8a7f6b',
   other: '#6b7785',
 }
 export function catColor(c) {

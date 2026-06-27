@@ -828,10 +828,18 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 		return "apple"
 	case containsAny(t, "telegram", "t.me") || ipPrefix(ip, "149.154.", "91.108.", "91.105."):
 		return "telegram"
+	case containsAny(t, "vk.com", "vkontakte", "userapi.com", "vk-cdn", "mycdn.me", "vkuser", "vkgroup", "vk.me") || ipPrefix(ip, "87.240.", "93.186.", "95.142.", "95.213."):
+		return "vk"
+	case containsAny(t, "netflix", "nflxvideo", "nflximg", "nflxext", "nflxso"):
+		return "netflix"
+	case containsAny(t, "spotify", "scdn.co", "pscdn.co", "spotifycdn"):
+		return "spotify"
 	case containsAny(t, "twitch", "ttvnw.net", "jtvnw.net", "live-video.net"):
 		return "twitch"
 	case containsAny(t, "discord", "discordapp"):
 		return "discord"
+	case containsAny(t, "microsoft", "windowsupdate", "office.com", "office365", "live.com", "outlook", "msedge", "bing.com", "azureedge", "msftncsi", "msftconnecttest", "skype"):
+		return "microsoft"
 	case containsAny(t, "wildberries"):
 		return "wildberries"
 	case containsAny(t, "fansly", "fbuddy"):
@@ -848,6 +856,8 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 		return "aws"
 	case containsAny(t, "battle.net", "blizzard", "steam", "steampowered", "steamcontent", "epicgames", "riotgames", "xboxlive", "playstation"):
 		return "games"
+	case containsAny(t, "akamai", "akamaized", "fastly", "edgekey", "edgesuite", "llnwd", "cdn77", "jsdelivr", "stackpath"):
+		return "cdn"
 	case port == 6881 || (port >= 6881 && port <= 6999):
 		return "p2p"
 	default:
