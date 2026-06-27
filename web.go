@@ -264,7 +264,6 @@ type apiClient struct {
 	Up          uint64        `json:"up"`
 	Total       uint64        `json:"total"`
 	TopCategory string        `json:"top_category"`
-	TopTarget   string        `json:"top_target"`
 	CurrentSite string        `json:"current_site"`
 	Series      []uint64      `json:"series"`
 	Cats        []apiCatShare `json:"cats"`
@@ -540,28 +539,39 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 	cutoff := now.Add(-d)
 	startMinute := cutoff.Unix() / 60
 	loggerOK := s.loggerHealthy()
-	clients := s.aggregateClients(cutoff)
-	// Surface configured-but-silent devices so the board can show who's offline,
-	// not just who had traffic (the roster comes from clients.yaml).
-	seen := map[string]bool{}
-	for _, c := range clients {
-		seen[c.Name] = true
-	}
+	// Read totals + cats + per-minute series straight from the binary buckets
+	// (the same fast path as the snapshot) instead of the heavy flow_minute_v1
+	// JSON scan — the board never used the per-target detail that scan produced.
+	snaps := s.snapshotFromRollup(cutoff, now)
+	// Surface configured-but-silent devices so the board shows who's offline, not
+	// just who had traffic (the roster comes from clients.yaml).
 	for _, dev := range s.aliases.Roster() {
-		if !seen[dev] {
-			clients = append(clients, &apiClient{Name: dev})
+		if snaps[dev] == nil {
+			snaps[dev] = &snapClient{cats: map[string]uint64{}}
 		}
 	}
 	sites, lastTLS := s.lastSitesByClient(cutoff)
 	lastDNS := s.lastDNSByClient(cutoff)
-	series := s.seriesByClient(cutoff, now)
-	for _, c := range clients {
-		c.CurrentSite = sites[c.Name]
-		c.Series = series[c.Name]
-		c.DeviceKind = s.resolveDeviceKind(c.Name)
-		c.Person = s.aliases.Person(c.Name)
-		v := classify(c.Series, startMinute, c.Total, c.Cats, c.DeviceKind, lastTLS[c.Name], lastDNS[c.Name], now, loggerOK)
+	clients := make([]*apiClient, 0, len(snaps))
+	for name, sc := range snaps {
+		cats := mapToShares(sc.cats)
+		c := &apiClient{
+			Name:        name,
+			Down:        sc.down,
+			Up:          sc.up,
+			Total:       sc.down + sc.up,
+			Cats:        cats,
+			Series:      sc.series,
+			CurrentSite: sites[name],
+			DeviceKind:  s.resolveDeviceKind(name),
+			Person:      s.aliases.Person(name),
+		}
+		if len(cats) > 0 {
+			c.TopCategory = cats[0].Category
+		}
+		v := classify(sc.series, startMinute, c.Total, cats, c.DeviceKind, lastTLS[name], lastDNS[name], now, loggerOK)
 		c.Verdict = &v
+		clients = append(clients, c)
 	}
 	sort.Slice(clients, func(i, j int) bool { return clients[i].Total > clients[j].Total })
 	writeJSON(w, map[string]any{"since": d.String(), "logger_ok": loggerOK, "clients": clients})
@@ -762,40 +772,6 @@ func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string
 		return true
 	})
 	return sites, last
-}
-
-func (s *webServer) aggregateClients(cutoff time.Time) []*apiClient {
-	aggs := map[string]*TopAgg{}
-	aggregateFromRollup(s.rollupPath, cutoff, "", aggs)
-	byClient := map[string]*apiClient{}
-	cats := map[string]map[string]uint64{}
-	topTargetBytes := map[string]uint64{}
-	for _, a := range aggs {
-		c := byClient[a.Client]
-		if c == nil {
-			c = &apiClient{Name: a.Client}
-			byClient[a.Client] = c
-			cats[a.Client] = map[string]uint64{}
-		}
-		c.Down += a.Down
-		c.Up += a.Up
-		tb := a.Down + a.Up
-		cats[a.Client][a.Category] += tb
-		if tb > topTargetBytes[a.Client] {
-			topTargetBytes[a.Client] = tb
-			c.TopTarget = a.Target
-		}
-	}
-	out := make([]*apiClient, 0, len(byClient))
-	for name, c := range byClient {
-		c.Total = c.Down + c.Up
-		c.Cats = mapToShares(cats[name])
-		if len(c.Cats) > 0 {
-			c.TopCategory = c.Cats[0].Category
-		}
-		out = append(out, c)
-	}
-	return out
 }
 
 // lastSitesByClient reverse-scans tls.jsonl within the window and returns, per
