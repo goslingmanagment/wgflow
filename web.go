@@ -919,8 +919,8 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	if len(targets) > 20 {
 		targets = targets[:20]
 	}
-	recentDNS := s.recentDNSForClient(name, recentCutoff, 12)
-	recentTLS := s.recentTLSForClient(name, recentCutoff, 12)
+	recentDNS := s.recentDNSForClient(name, recentCutoff, to, 12)
+	recentTLS := s.recentTLSForClient(name, recentCutoff, to, 12)
 	series := s.seriesByClient(from, to)[name]
 	cats := mapToShares(cat)
 	loggerOK := s.loggerHealthy()
@@ -1160,11 +1160,14 @@ func (s *webServer) handleClientMinute(w http.ResponseWriter, r *http.Request, n
 	writeJSON(w, map[string]any{"at": at.Unix(), "tls": tls, "dns": dns})
 }
 
-func (s *webServer) recentDNSForClient(name string, cutoff time.Time, limit int) []DNSRecord {
+func (s *webServer) recentDNSForClient(name string, cutoff, to time.Time, limit int) []DNSRecord {
 	out := []DNSRecord{}
 	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
 		var rec DNSRecord
 		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.After(to) {
 			return true
 		}
 		if rec.TS.Before(cutoff) {
@@ -1181,11 +1184,14 @@ func (s *webServer) recentDNSForClient(name string, cutoff time.Time, limit int)
 	return out
 }
 
-func (s *webServer) recentTLSForClient(name string, cutoff time.Time, limit int) []TLSRecord {
+func (s *webServer) recentTLSForClient(name string, cutoff, to time.Time, limit int) []TLSRecord {
 	out := []TLSRecord{}
 	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.After(to) {
 			return true
 		}
 		if rec.TS.Before(cutoff) {

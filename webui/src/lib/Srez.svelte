@@ -13,6 +13,8 @@
   let loading = $state(false)
   let copied = $state(false)
   let copyErr = $state(false)
+  let snapWin = $state('')
+  let loadSeq = 0
 
   const CAVEAT =
     '⚠ inferred из метаданных. HTTPS не виден; QUIC даёт IP без имени; ' +
@@ -23,16 +25,22 @@
   })
 
   async function load(w, clients) {
+    const seq = ++loadSeq
     loading = true
+    snap = null
+    snapWin = ''
+    err = null
     try {
       const u = new URLSearchParams({ since: w })
       if (clients) u.set('clients', clients)
-      snap = await getJSON('/api/snapshot?' + u.toString())
-      err = null
+      const next = await getJSON('/api/snapshot?' + u.toString())
+      if (seq !== loadSeq) return
+      snap = next
+      snapWin = w
     } catch (e) {
-      err = e.message
+      if (seq === loadSeq) err = e.message
     } finally {
-      loading = false
+      if (seq === loadSeq) loading = false
     }
   }
 
@@ -87,7 +95,7 @@
     if (!snap) return ''
     const out = []
     if (!snap.logger_ok) out.push('⚠ ЛОГГЕР НЕ ПОДТВЕРЖДЁН — выводы ненадёжны, тишина не доказана.', '')
-    out.push(`Срез на ${hhmmMSK(snap.generated_at)} МСК, последние ${windowLabel(win)}.`, '')
+    out.push(`Срез на ${hhmmMSK(snap.generated_at)} МСК, последние ${windowLabel(snapWin)}.`, '')
     const groups = {}
     // person comes from the server (clients.yaml or its prefix fallback)
     for (const c of snap.clients || []) (groups[c.person || personOf(c.name)] ||= []).push(c)
@@ -136,7 +144,7 @@
 
 {#if open}
   <div class="backdrop" onclick={onClose} role="presentation"></div>
-  <aside class="drawer" role="dialog" aria-label="Срез">
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="Срез">
     <header>
       <div class="title serif">Срез <span>· последние {win}</span></div>
       <div class="acts">
@@ -163,7 +171,7 @@
     {:else}
       <pre class="srez">{text}</pre>
     {/if}
-  </aside>
+  </div>
 {/if}
 
 <style>

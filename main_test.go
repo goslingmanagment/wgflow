@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -346,6 +348,58 @@ func TestParseRange(t *testing.T) {
 	}
 	if _, _, ok := parseRange(mk("from=1782561000&to=1782560000")); ok {
 		t.Error("to<=from -> ok should be false")
+	}
+}
+
+func TestClientDetailRecentHonorsTo(t *testing.T) {
+	logDir := t.TempDir()
+	writeJSONL := func(name string, vals ...any) {
+		t.Helper()
+		f, err := os.Create(filepath.Join(logDir, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer f.Close()
+		enc := json.NewEncoder(f)
+		for _, v := range vals {
+			if err := enc.Encode(v); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	to := time.Now().Truncate(time.Second)
+	from := to.Add(-5 * time.Minute)
+	inside := to.Add(-1 * time.Minute)
+	future := to.Add(1 * time.Minute)
+	writeJSONL("tls.jsonl",
+		TLSRecord{TS: inside, Client: "alice", ServerName: "inside.example", RemotePort: 443},
+		TLSRecord{TS: future, Client: "alice", ServerName: "future.example", RemotePort: 443},
+	)
+	writeJSONL("dns.jsonl",
+		DNSRecord{TS: inside, Client: "alice", Query: "inside.example", QType: "A"},
+		DNSRecord{TS: future, Client: "alice", Query: "future.example", QType: "A"},
+	)
+
+	srv := &webServer{logDir: logDir, rollupPath: filepath.Join(t.TempDir(), "missing.db")}
+	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/clients/alice?from=%d&to=%d", from.Unix(), to.Unix()), nil)
+	rec := httptest.NewRecorder()
+	srv.handleClientDetail(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var got struct {
+		RecentTLS []TLSRecord `json:"recent_tls"`
+		RecentDNS []DNSRecord `json:"recent_dns"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got.RecentTLS) != 1 || got.RecentTLS[0].ServerName != "inside.example" {
+		t.Fatalf("recent_tls = %+v, want only inside.example", got.RecentTLS)
+	}
+	if len(got.RecentDNS) != 1 || got.RecentDNS[0].Query != "inside.example" {
+		t.Fatalf("recent_dns = %+v, want only inside.example", got.RecentDNS)
 	}
 }
 
