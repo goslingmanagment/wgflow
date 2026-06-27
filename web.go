@@ -157,6 +157,44 @@ func atoiDefault(s string, def int) int {
 	return n
 }
 
+func parseTimeParam(v string) (time.Time, bool) {
+	if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+		return time.Unix(n, 0), true
+	}
+	if t, err := time.Parse(time.RFC3339, v); err == nil {
+		return t, true
+	}
+	return time.Time{}, false
+}
+
+// parseRange reads an absolute window from ?from=&to= (unix seconds or RFC3339);
+// `to` defaults to now. ok=false when no usable from is present, so callers fall
+// back to the relative ?since=. This is what powers "после 02:05".
+func parseRange(r *http.Request) (from, to time.Time, ok bool) {
+	from, ok = parseTimeParam(r.URL.Query().Get("from"))
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	to = time.Now()
+	if t, ok2 := parseTimeParam(r.URL.Query().Get("to")); ok2 {
+		to = t
+	}
+	if !to.After(from) {
+		return time.Time{}, time.Time{}, false
+	}
+	return from, to, true
+}
+
+// windowFromRequest yields the effective [from, to]: an absolute from/to if
+// given, else now-since..now.
+func windowFromRequest(r *http.Request, def time.Duration) (from, to time.Time) {
+	if f, t, ok := parseRange(r); ok {
+		return f, t
+	}
+	now := time.Now()
+	return now.Add(-parseSince(r, def)), now
+}
+
 func topKey(m map[string]uint64) string {
 	best := ""
 	var bv uint64
@@ -846,25 +884,27 @@ type apiHour struct {
 }
 
 func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
-	name := strings.TrimPrefix(r.URL.Path, "/api/clients/")
-	if name == "" {
+	rest := strings.TrimPrefix(r.URL.Path, "/api/clients/")
+	if rest == "" {
 		http.NotFound(w, r)
 		return
 	}
-	d := parseSince(r, 15*time.Minute)
-	now := time.Now()
-	cutoff := now.Add(-d)
-	recentLookback := d
+	name, sub, _ := strings.Cut(rest, "/")
+	if sub == "minute" {
+		s.handleClientMinute(w, r, name)
+		return
+	}
+	from, to := windowFromRequest(r, 15*time.Minute)
+	recentLookback := to.Sub(from)
 	if recentLookback < 6*time.Hour {
 		recentLookback = 6 * time.Hour
 	}
-	recentCutoff := now.Add(-recentLookback)
-	aggs := map[string]*TopAgg{}
-	aggregateFromRollup(s.rollupPath, cutoff, name, aggs)
+	recentCutoff := to.Add(-recentLookback)
+	aggList := s.clientFlowsWindow(name, from, to)
 	var down, up uint64
 	cat := map[string]uint64{}
-	targets := make([]apiFlow, 0, len(aggs))
-	for _, a := range aggs {
+	targets := make([]apiFlow, 0, len(aggList))
+	for _, a := range aggList {
 		down += a.Down
 		up += a.Up
 		cat[a.Category] += a.Down + a.Up
@@ -876,7 +916,7 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	recentDNS := s.recentDNSForClient(name, recentCutoff, 12)
 	recentTLS := s.recentTLSForClient(name, recentCutoff, 12)
-	series := s.seriesByClient(cutoff, now)[name]
+	series := s.seriesByClient(from, to)[name]
 	cats := mapToShares(cat)
 	loggerOK := s.loggerHealthy()
 	devKind := deviceKind(name)
@@ -889,26 +929,229 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	if len(recentDNS) > 0 {
 		lastDNS = recentDNS[0].TS
 	}
-	verdict := classify(series, cutoff.Unix()/60, down+up, cats, devKind, lastTLS, lastDNS, now, loggerOK)
+	verdict := classify(series, from.Unix()/60, down+up, cats, devKind, lastTLS, lastDNS, to, loggerOK)
 	writeJSON(w, map[string]any{
 		"name":   name,
-		"since":  d.String(),
+		"since":  to.Sub(from).Round(time.Minute).String(),
+		"from":   from.Unix(),
+		"to":     to.Unix(),
 		"down":   down,
 		"up":     up,
 		"total":  down + up,
 		"series": series,
 		// First minute the zero-filled series covers, so the client can build a
 		// throughput x-axis from real server timestamps instead of its own clock.
-		"series_start_minute": cutoff.Unix() / 60,
+		"series_start_minute": from.Unix() / 60,
 		"categories":          cats,
 		"top_targets":         targets,
-		"recent_dns":          recentDNS,
-		"recent_tls":          recentTLS,
-		"day":                 s.clientDayTimeline(name),
-		"device_kind":         devKind,
-		"logger_ok":           loggerOK,
-		"verdict":             verdict,
+		// Per-minute reconstruction ribbon (binary bucket; nil for windows too wide
+		// to render minute-by-minute). Domains load lazily via /minute.
+		"minutes":     s.clientMinuteRibbon(name, from, to),
+		"recent_dns":  recentDNS,
+		"recent_tls":  recentTLS,
+		"day":         s.clientDayTimeline(name),
+		"device_kind": devKind,
+		"logger_ok":   loggerOK,
+		"verdict":     verdict,
 	})
+}
+
+// clientFlowsWindow aggregates one client's per-target flows over [from, to] from
+// flow_minute_v1, bounded on both ends (so an explicit ?to= is honored).
+func (s *webServer) clientFlowsWindow(name string, from, to time.Time) []*TopAgg {
+	fromMin := from.Unix() / 60
+	toMin := to.Unix() / 60
+	aggs := map[string]*TopAgg{}
+	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		return nil
+	}
+	defer db.Close()
+	_ = db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket(rollupBucket)
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		start := []byte(fmt.Sprintf("%012d", fromMin))
+		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+			var row RollupRow
+			if json.Unmarshal(v, &row) != nil {
+				continue
+			}
+			if row.Minute > toMin {
+				break
+			}
+			if row.Minute < fromMin || row.Client != name {
+				continue
+			}
+			key := row.Client + "\t" + row.Category + "\t" + row.Target + "\t" + row.Proto + "\t" + strconv.Itoa(int(row.Port))
+			a := aggs[key]
+			if a == nil {
+				a = &TopAgg{Client: row.Client, Category: row.Category, Target: row.Target, Proto: row.Proto, Port: row.Port}
+				aggs[key] = a
+			}
+			a.Down += row.DownloadBytes
+			a.Up += row.UploadBytes
+			a.DownP += row.DownloadPackets
+			a.UpP += row.UploadPackets
+		}
+		return nil
+	})
+	out := make([]*TopAgg, 0, len(aggs))
+	for _, a := range aggs {
+		out = append(out, a)
+	}
+	return out
+}
+
+type apiMinute struct {
+	T           int64  `json:"t"` // unix seconds at the minute start
+	Bytes       uint64 `json:"bytes"`
+	Down        uint64 `json:"down"`
+	Up          uint64 `json:"up"`
+	TopCategory string `json:"top_category"`
+	Over100K    bool   `json:"over_100k"`
+	Over1M      bool   `json:"over_1m"`
+}
+
+// clientMinuteRibbon returns one zero-filled row per MSK minute over [from, to]
+// (silent minutes included) with the dominant category — bytes/flags from the
+// binary buckets only, no domain join. Capped so it can't be asked to render an
+// unbounded ribbon; nil means "window too wide, don't show the ribbon".
+func (s *webServer) clientMinuteRibbon(name string, from, to time.Time) []apiMinute {
+	const maxMinutes = 45
+	fromMin := from.Unix() / 60
+	toMin := to.Unix() / 60
+	n := int(toMin - fromMin + 1)
+	if n <= 0 || n > maxMinutes {
+		return nil
+	}
+	const kb, mb = 1 << 10, 1 << 20
+	out := make([]apiMinute, n)
+	cats := make([]map[string]uint64, n)
+	for i := range out {
+		out[i].T = (fromMin + int64(i)) * 60
+	}
+	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		return out
+	}
+	defer db.Close()
+	_ = db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(rollupClientBucket); b != nil {
+			c := b.Cursor()
+			start := []byte(fmt.Sprintf("%012d", fromMin))
+			for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+				parts := strings.SplitN(string(k), "\t", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				m, err := strconv.ParseInt(parts[0], 10, 64)
+				if err != nil {
+					continue
+				}
+				if m > toMin {
+					break
+				}
+				if m < fromMin || parts[1] != name {
+					continue
+				}
+				tot := decodeRollupTotalValue(v)
+				idx := int(m - fromMin)
+				out[idx].Down += tot.DownloadBytes
+				out[idx].Up += tot.UploadBytes
+				out[idx].Bytes += tot.DownloadBytes + tot.UploadBytes
+			}
+		}
+		if cb := tx.Bucket(rollupClientCategoryBucket); cb != nil {
+			prefix := []byte(name + "\t")
+			start := []byte(fmt.Sprintf("%s\t%012d", name, fromMin))
+			c := cb.Cursor()
+			for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+				p := strings.SplitN(string(k), "\t", 3)
+				if len(p) != 3 {
+					continue
+				}
+				m, err := strconv.ParseInt(p[1], 10, 64)
+				if err != nil {
+					continue
+				}
+				if m > toMin {
+					break
+				}
+				if m < fromMin {
+					continue
+				}
+				idx := int(m - fromMin)
+				if cats[idx] == nil {
+					cats[idx] = map[string]uint64{}
+				}
+				tot := decodeRollupTotalValue(v)
+				cats[idx][p[2]] += tot.DownloadBytes + tot.UploadBytes
+			}
+		}
+		return nil
+	})
+	for i := range out {
+		if cats[i] != nil {
+			out[i].TopCategory = topKey(cats[i])
+		}
+		out[i].Over100K = out[i].Bytes > 100*kb
+		out[i].Over1M = out[i].Bytes > mb
+	}
+	return out
+}
+
+// handleClientMinute serves the lazily-loaded domains for a single flagged minute:
+// the distinct TLS SNIs and DNS queries in [at, at+60s). Reaches only as far back
+// as un-rotated JSONL — older minutes return empty (honestly, not faked).
+func (s *webServer) handleClientMinute(w http.ResponseWriter, r *http.Request, name string) {
+	at, ok := parseTimeParam(r.URL.Query().Get("at"))
+	if !ok {
+		http.Error(w, "missing at", http.StatusBadRequest)
+		return
+	}
+	end := at.Add(time.Minute)
+	tls := []string{}
+	tlsSeen := map[string]bool{}
+	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+		var rec TLSRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.Before(at) {
+			return false
+		}
+		if rec.Client != name || rec.ServerName == "" || !rec.TS.Before(end) {
+			return true
+		}
+		if !tlsSeen[rec.ServerName] {
+			tlsSeen[rec.ServerName] = true
+			tls = append(tls, rec.ServerName)
+		}
+		return true
+	})
+	dns := []string{}
+	dnsSeen := map[string]bool{}
+	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+		var rec DNSRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.Before(at) {
+			return false
+		}
+		if rec.Client != name || rec.Query == "" || !rec.TS.Before(end) {
+			return true
+		}
+		if !dnsSeen[rec.Query] {
+			dnsSeen[rec.Query] = true
+			dns = append(dns, rec.Query)
+		}
+		return true
+	})
+	writeJSON(w, map[string]any{"at": at.Unix(), "tls": tls, "dns": dns})
 }
 
 func (s *webServer) recentDNSForClient(name string, cutoff time.Time, limit int) []DNSRecord {

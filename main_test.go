@@ -231,6 +231,58 @@ func TestSnapshotFromRollup(t *testing.T) {
 	}
 }
 
+func TestClientMinuteRibbon(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollup.db")
+	rollup, err := OpenRollup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollup.Close()
+
+	base := time.Now().Add(-4 * time.Minute).Truncate(time.Minute)
+	recs := []FlowRecord{
+		// minute 0: 2 MB Yandex -> >1MB flag
+		{TSEnd: base, Client: "diana-iphone", RemoteIP: "87.250.250.242", RemotePort: 443, Proto: "tcp", Domain: "api.music.yandex.net", ClientDownloadBytes: 2 << 20},
+		// minute +2: 50 KB Apple -> below the 100KB flag
+		{TSEnd: base.Add(2 * time.Minute), Client: "diana-iphone", RemoteIP: "17.57.144.22", RemotePort: 443, Proto: "tcp", Domain: "gateway.icloud.com", ClientDownloadBytes: 50 << 10},
+	}
+	if err := rollup.Add(recs); err != nil {
+		t.Fatal(err)
+	}
+	srv := &webServer{rollupPath: path}
+	// window [base-1, base+3] -> 5 minutes; idx1=base, idx3=base+2, rest silent
+	mins := srv.clientMinuteRibbon("diana-iphone", base.Add(-time.Minute), base.Add(3*time.Minute))
+	if len(mins) != 5 {
+		t.Fatalf("ribbon len = %d, want 5", len(mins))
+	}
+	if !mins[1].Over1M || !mins[1].Over100K || mins[1].TopCategory != "yandex" {
+		t.Errorf("minute 1 = %+v, want 2MB yandex flagged", mins[1])
+	}
+	if mins[3].Over100K || mins[3].Over1M {
+		t.Errorf("minute 3 (50KB) must not be flagged: %+v", mins[3])
+	}
+	if mins[3].TopCategory != "apple" {
+		t.Errorf("minute 3 category = %q, want apple", mins[3].TopCategory)
+	}
+	if mins[0].Bytes != 0 || mins[2].Bytes != 0 || mins[4].Bytes != 0 {
+		t.Errorf("silent minutes must be zero-filled: %+v %+v %+v", mins[0], mins[2], mins[4])
+	}
+}
+
+func TestParseRange(t *testing.T) {
+	mk := func(q string) *http.Request { return httptest.NewRequest(http.MethodGet, "/x?"+q, nil) }
+	if _, _, ok := parseRange(mk("since=5m")); ok {
+		t.Error("no from -> ok should be false")
+	}
+	from, to, ok := parseRange(mk("from=1782560000&to=1782561000"))
+	if !ok || from.Unix() != 1782560000 || to.Unix() != 1782561000 {
+		t.Errorf("from/to = %d..%d ok=%v", from.Unix(), to.Unix(), ok)
+	}
+	if _, _, ok := parseRange(mk("from=1782561000&to=1782560000")); ok {
+		t.Error("to<=from -> ok should be false")
+	}
+}
+
 func TestDeviceKind(t *testing.T) {
 	cases := map[string]string{
 		"diana-iphone": "phone",
