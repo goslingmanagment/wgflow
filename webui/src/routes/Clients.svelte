@@ -6,11 +6,13 @@
   import Icon from '../lib/Icon.svelte'
   import HealthPill from '../lib/HealthPill.svelte'
   import VerdictBadge from '../lib/VerdictBadge.svelte'
+  import Srez from '../lib/Srez.svelte'
 
   let data = $state(null)
   let err = $state(null)
   let search = $state('')
   let sort = $state('total')
+  let srezOpen = $state(false)
 
   $effect(() => {
     const s = ui.since
@@ -40,8 +42,11 @@
     <button class:on={sort === 'total'} onclick={() => (sort = 'total')}>volume</button>
     <button class:on={sort === 'name'} onclick={() => (sort = 'name')}>name</button>
     <span class="srch"><Icon name="search" size={15} /><input placeholder="find client" bind:value={search} /></span>
+    <button class="srez-btn" onclick={() => (srezOpen = true)}>Срез</button>
   </div>
 </div>
+
+<Srez open={srezOpen} onClose={() => (srezOpen = false)} names={(data?.clients || []).map((c) => c.name)} />
 
 {#if err}
   <p class="err">Couldn't load clients. Is <code>wgflow web</code> running? ({err})</p>
@@ -114,6 +119,19 @@
     background: var(--color-coral-dim);
     color: var(--color-coral);
     border-color: transparent;
+  }
+  .srez-btn {
+    background: var(--color-coral);
+    color: #fff;
+    border: 0;
+    border-radius: 7px;
+    padding: 6px 14px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+  }
+  .srez-btn:hover {
+    filter: brightness(1.05);
   }
   .srch {
     display: inline-flex;
