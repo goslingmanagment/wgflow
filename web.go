@@ -214,6 +214,185 @@ type apiClient struct {
 	CurrentSite string        `json:"current_site"`
 	Series      []uint64      `json:"series"`
 	Cats        []apiCatShare `json:"cats"`
+	DeviceKind  string        `json:"device_kind"`
+	Verdict     *apiVerdict   `json:"verdict,omitempty"`
+}
+
+// apiVerdict is the rich, falsifiable output of the classifier. It describes the
+// DEVICE's traffic, never human intent: every reason is the exact rule that
+// fired so the UI can render "· inferred", and SILENT is only trustworthy when
+// logger_ok (surfaced at the response top level) is true.
+type apiVerdict struct {
+	Status            string      `json:"status"`     // active | likely-background | silent
+	Confidence        string      `json:"confidence"` // low | medium | high
+	Reasons           []string    `json:"reasons"`
+	LastSignificantAt *time.Time  `json:"last_significant_at,omitempty"` // last >100KB minute — last "real use" trace
+	Evidence          apiEvidence `json:"evidence"`
+}
+
+type apiEvidence struct {
+	LastAnyAt    *time.Time `json:"last_any_at,omitempty"` // last minute with any bytes (incl. a lone push)
+	LastTLS      *time.Time `json:"last_tls,omitempty"`
+	LastDNS      *time.Time `json:"last_dns,omitempty"`
+	MinOver1MB   int        `json:"min_over_1mb"`
+	MinOver100KB int        `json:"min_over_100kb"`
+	DeviceKind   string     `json:"device_kind"`
+	TotalBytes   uint64     `json:"total_bytes"`
+	FreshTLSDNS  bool       `json:"fresh_tls_dns"` // a TLS or DNS trace within ~3 min
+}
+
+// deviceKind infers phone/laptop from the WireGuard peer name. Heuristic; an
+// explicit clients.yaml override will supersede it later (roadmap step 5).
+func deviceKind(name string) string {
+	n := strings.ToLower(name)
+	switch {
+	case containsAnyStr(n, "iphone", "ipad", "ipod", "phone", "android", "pixel"):
+		return "phone"
+	case containsAnyStr(n, "macbook", "imac", "mac", "laptop", "desktop", "windows", "linux", "-pc"):
+		return "laptop"
+	default:
+		return ""
+	}
+}
+
+func containsAnyStr(s string, subs ...string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
+
+// backgroundCats, on their own, usually mean OS chatter (push, cert checks, DNS)
+// rather than a person using the device. apple is included but stays hedged: it
+// also covers Apple Music / iCloud, which we cannot distinguish from metadata.
+var backgroundCats = map[string]bool{"apple": true, "dns": true}
+
+func isBackgroundOnly(cats []apiCatShare) bool {
+	seen := false
+	for _, c := range cats {
+		if c.Bytes == 0 {
+			continue
+		}
+		seen = true
+		if !backgroundCats[c.Category] {
+			return false
+		}
+	}
+	return seen
+}
+
+func freshWithin(t, now time.Time, d time.Duration) bool {
+	return !t.IsZero() && now.Sub(t) >= 0 && now.Sub(t) < d
+}
+
+// classify is the verdict engine: heuristic, always hedged, never asserting that
+// a human acted. It reads the cheap per-minute byte series plus last TLS/DNS
+// freshness and the device kind. SILENT requires loggerOK so an outage is never
+// branded as quiet.
+func classify(series []uint64, startMinute int64, total uint64, cats []apiCatShare, devKind string, lastTLS, lastDNS, now time.Time, loggerOK bool) apiVerdict {
+	const kb, mb = 1 << 10, 1 << 20
+	var minOver1MB, minOver100KB int
+	var lastAnyMin, lastSigMin int64 = -1, -1
+	for i, b := range series {
+		if b == 0 {
+			continue
+		}
+		lastAnyMin = startMinute + int64(i)
+		if b > 100*kb {
+			minOver100KB++
+			lastSigMin = startMinute + int64(i)
+		}
+		if b > mb {
+			minOver1MB++
+		}
+	}
+	fresh := freshWithin(lastTLS, now, 3*time.Minute) || freshWithin(lastDNS, now, 3*time.Minute)
+	ev := apiEvidence{
+		MinOver1MB: minOver1MB, MinOver100KB: minOver100KB,
+		DeviceKind: devKind, TotalBytes: total, FreshTLSDNS: fresh,
+	}
+	if lastAnyMin >= 0 {
+		t := time.Unix(lastAnyMin*60, 0)
+		ev.LastAnyAt = &t
+	}
+	if !lastTLS.IsZero() {
+		t := lastTLS
+		ev.LastTLS = &t
+	}
+	if !lastDNS.IsZero() {
+		t := lastDNS
+		ev.LastDNS = &t
+	}
+	v := apiVerdict{Evidence: ev, Reasons: []string{}}
+	if lastSigMin >= 0 {
+		t := time.Unix(lastSigMin*60, 0)
+		v.LastSignificantAt = &t
+	}
+
+	phone := devKind == "phone"
+	laptop := devKind == "laptop"
+	bgOnly := isBackgroundOnly(cats)
+	hedgeApple := func() {
+		if bgOnly {
+			v.Reasons = append(v.Reasons, "только apple — Apple Music или iCloud, не доказуемо как фон")
+		}
+	}
+
+	switch {
+	case total == 0:
+		v.Status = "silent"
+		if loggerOK {
+			v.Confidence = "high"
+			v.Reasons = append(v.Reasons, "0 байт за окно, логгер исправен")
+		} else {
+			v.Confidence = "low"
+			v.Reasons = append(v.Reasons, "0 байт, но здоровье логгера не подтверждено — тишина недоказуема")
+		}
+	case minOver1MB >= 2:
+		v.Status = "active"
+		v.Confidence = boolPick(phone, "high", "medium")
+		v.Reasons = append(v.Reasons, fmt.Sprintf("%d мин >1 МБ — устойчивый поток", minOver1MB))
+		if fresh {
+			v.Reasons = append(v.Reasons, "свежий TLS/DNS <3 мин")
+		}
+		if laptop {
+			v.Reasons = append(v.Reasons, "ноутбук — оценка мягче")
+		}
+		hedgeApple()
+	case total >= 20*mb:
+		v.Status = "active"
+		v.Confidence = boolPick(phone, "high", "medium")
+		v.Reasons = append(v.Reasons, "десятки МБ за окно")
+		if laptop {
+			v.Reasons = append(v.Reasons, "ноутбук — оценка мягче")
+		}
+		hedgeApple()
+	case fresh && !bgOnly:
+		v.Status = "active"
+		v.Confidence = boolPick(phone, "medium", "low")
+		v.Reasons = append(v.Reasons, "свежий TLS/DNS <3 мин к не-фоновой категории")
+		if laptop {
+			v.Reasons = append(v.Reasons, "ноутбук — мог быть фоновый процесс")
+		}
+	case bgOnly:
+		v.Status = "likely-background"
+		v.Confidence = boolPick(laptop, "high", "medium")
+		v.Reasons = append(v.Reasons, "только apple/dns, без свежих соединений — вероятно фон (push/OCSP)")
+	default:
+		v.Status = "likely-background"
+		v.Confidence = "low"
+		v.Reasons = append(v.Reasons, fmt.Sprintf("малый объём, %d мин >100 КБ, нет устойчивого потока", minOver100KB))
+	}
+	return v
+}
+
+func boolPick(cond bool, ifTrue, ifFalse string) string {
+	if cond {
+		return ifTrue
+	}
+	return ifFalse
 }
 
 func (s *webServer) handleSystem(w http.ResponseWriter, r *http.Request) {
@@ -304,15 +483,21 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 	d := parseSince(r, 15*time.Minute)
 	now := time.Now()
 	cutoff := now.Add(-d)
+	startMinute := cutoff.Unix() / 60
+	loggerOK := s.loggerHealthy()
 	clients := s.aggregateClients(cutoff)
-	sites := s.lastSitesByClient(cutoff)
+	sites, lastTLS := s.lastSitesByClient(cutoff)
+	lastDNS := s.lastDNSByClient(cutoff)
 	series := s.seriesByClient(cutoff, now)
 	for _, c := range clients {
 		c.CurrentSite = sites[c.Name]
 		c.Series = series[c.Name]
+		c.DeviceKind = deviceKind(c.Name)
+		v := classify(c.Series, startMinute, c.Total, c.Cats, c.DeviceKind, lastTLS[c.Name], lastDNS[c.Name], now, loggerOK)
+		c.Verdict = &v
 	}
 	sort.Slice(clients, func(i, j int) bool { return clients[i].Total > clients[j].Total })
-	writeJSON(w, map[string]any{"since": d.String(), "clients": clients})
+	writeJSON(w, map[string]any{"since": d.String(), "logger_ok": loggerOK, "clients": clients})
 }
 
 func (s *webServer) aggregateClients(cutoff time.Time) []*apiClient {
@@ -349,8 +534,12 @@ func (s *webServer) aggregateClients(cutoff time.Time) []*apiClient {
 	return out
 }
 
-func (s *webServer) lastSitesByClient(cutoff time.Time) map[string]string {
+// lastSitesByClient reverse-scans tls.jsonl within the window and returns, per
+// client, the most recent SNI plus its timestamp (the timestamp feeds the
+// classifier's "fresh TLS" signal — nearly free since we already walk the file).
+func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[string]time.Time) {
 	res := map[string]string{}
+	last := map[string]time.Time{}
 	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
@@ -359,12 +548,50 @@ func (s *webServer) lastSitesByClient(cutoff time.Time) map[string]string {
 		if rec.TS.Before(cutoff) {
 			return false
 		}
+		if _, ok := last[rec.Client]; !ok {
+			last[rec.Client] = rec.TS
+		}
 		if _, ok := res[rec.Client]; !ok && rec.ServerName != "" {
 			res[rec.Client] = rec.ServerName
 		}
 		return true
 	})
-	return res
+	return res, last
+}
+
+// lastDNSByClient reverse-scans dns.jsonl within the window for each client's
+// most recent query time — the second half of the classifier's freshness signal.
+func (s *webServer) lastDNSByClient(cutoff time.Time) map[string]time.Time {
+	last := map[string]time.Time{}
+	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+		var rec DNSRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.Before(cutoff) {
+			return false
+		}
+		if _, ok := last[rec.Client]; !ok {
+			last[rec.Client] = rec.TS
+		}
+		return true
+	})
+	return last
+}
+
+// loggerHealthy reports whether the capture's stats.json heartbeat is fresh, so
+// the classifier can gate SILENT on it (an outage must never read as quiet).
+// Mirrors the frontend's 90s staleness threshold.
+func (s *webServer) loggerHealthy() bool {
+	b, err := os.ReadFile(filepath.Join(s.logDir, "stats.json"))
+	if err != nil {
+		return false
+	}
+	var st RuntimeStats
+	if json.Unmarshal(b, &st) != nil || st.UpdatedAt.IsZero() {
+		return false
+	}
+	return time.Since(st.UpdatedAt) < 90*time.Second
 }
 
 // seriesByClient returns a zero-filled per-minute byte total (download+upload)
@@ -450,21 +677,40 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	if len(targets) > 20 {
 		targets = targets[:20]
 	}
+	recentDNS := s.recentDNSForClient(name, recentCutoff, 12)
+	recentTLS := s.recentTLSForClient(name, recentCutoff, 12)
+	series := s.seriesByClient(cutoff, now)[name]
+	cats := mapToShares(cat)
+	loggerOK := s.loggerHealthy()
+	devKind := deviceKind(name)
+	// Reuse the recent lists (newest first) for freshness — reaches back further
+	// than the window, so "last seen" survives a short window.
+	var lastTLS, lastDNS time.Time
+	if len(recentTLS) > 0 {
+		lastTLS = recentTLS[0].TS
+	}
+	if len(recentDNS) > 0 {
+		lastDNS = recentDNS[0].TS
+	}
+	verdict := classify(series, cutoff.Unix()/60, down+up, cats, devKind, lastTLS, lastDNS, now, loggerOK)
 	writeJSON(w, map[string]any{
 		"name":   name,
 		"since":  d.String(),
 		"down":   down,
 		"up":     up,
 		"total":  down + up,
-		"series": s.seriesByClient(cutoff, now)[name],
+		"series": series,
 		// First minute the zero-filled series covers, so the client can build a
 		// throughput x-axis from real server timestamps instead of its own clock.
 		"series_start_minute": cutoff.Unix() / 60,
-		"categories":          mapToShares(cat),
+		"categories":          cats,
 		"top_targets":         targets,
-		"recent_dns":          s.recentDNSForClient(name, recentCutoff, 12),
-		"recent_tls":          s.recentTLSForClient(name, recentCutoff, 12),
+		"recent_dns":          recentDNS,
+		"recent_tls":          recentTLS,
 		"day":                 s.clientDayTimeline(name),
+		"device_kind":         devKind,
+		"logger_ok":           loggerOK,
+		"verdict":             verdict,
 	})
 }
 
