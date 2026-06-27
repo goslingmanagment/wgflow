@@ -48,6 +48,15 @@ type webServer struct {
 	rollupPath string
 	wgConfig   string
 	iface      string
+	aliases    *AliasConfig
+}
+
+// resolveDeviceKind prefers the clients.yaml override, then the name-suffix guess.
+func (s *webServer) resolveDeviceKind(name string) string {
+	if k := s.aliases.Kind(name); k != "" {
+		return k
+	}
+	return deviceKind(name)
 }
 
 func webCmd(args []string) error {
@@ -57,12 +66,18 @@ func webCmd(args []string) error {
 	rollupPath := fset.String("rollup", "/var/lib/wgflow/rollup.db", "rollup DB path")
 	wgConfig := fset.String("wg-config", "/etc/wireguard/wg0.conf", "WireGuard config path")
 	iface := fset.String("iface", "wg0", "interface label")
+	clientsConfig := fset.String("clients-config", "/etc/wgflow/clients.yaml", "client alias config for person grouping (optional)")
 	authPassword := fset.String("auth-password", os.Getenv("WGFLOW_WEB_PASSWORD"), "HTTP Basic Auth password; defaults to WGFLOW_WEB_PASSWORD")
 	authRealm := fset.String("auth-realm", "wgflow", "HTTP Basic Auth realm")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
-	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface}
+	aliases, err := loadAliasConfig(*clientsConfig)
+	if err != nil {
+		return fmt.Errorf("clients-config %s: %w", *clientsConfig, err)
+	}
+	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases}
+	log.Printf("clients-config=%s people=%d devices=%d", *clientsConfig, len(aliases.people), len(aliases.roster))
 	mux := http.NewServeMux()
 	s.routes(mux)
 	handler := http.Handler(mux)
@@ -254,6 +269,7 @@ type apiClient struct {
 	Series      []uint64      `json:"series"`
 	Cats        []apiCatShare `json:"cats"`
 	DeviceKind  string        `json:"device_kind"`
+	Person      string        `json:"person"`
 	Verdict     *apiVerdict   `json:"verdict,omitempty"`
 }
 
@@ -525,13 +541,25 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 	startMinute := cutoff.Unix() / 60
 	loggerOK := s.loggerHealthy()
 	clients := s.aggregateClients(cutoff)
+	// Surface configured-but-silent devices so the board can show who's offline,
+	// not just who had traffic (the roster comes from clients.yaml).
+	seen := map[string]bool{}
+	for _, c := range clients {
+		seen[c.Name] = true
+	}
+	for _, dev := range s.aliases.Roster() {
+		if !seen[dev] {
+			clients = append(clients, &apiClient{Name: dev})
+		}
+	}
 	sites, lastTLS := s.lastSitesByClient(cutoff)
 	lastDNS := s.lastDNSByClient(cutoff)
 	series := s.seriesByClient(cutoff, now)
 	for _, c := range clients {
 		c.CurrentSite = sites[c.Name]
 		c.Series = series[c.Name]
-		c.DeviceKind = deviceKind(c.Name)
+		c.DeviceKind = s.resolveDeviceKind(c.Name)
+		c.Person = s.aliases.Person(c.Name)
 		v := classify(c.Series, startMinute, c.Total, c.Cats, c.DeviceKind, lastTLS[c.Name], lastDNS[c.Name], now, loggerOK)
 		c.Verdict = &v
 	}
@@ -541,6 +569,7 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 
 type apiSnapshotClient struct {
 	Name            string        `json:"name"`
+	Person          string        `json:"person"`
 	DeviceKind      string        `json:"device_kind"`
 	Down            uint64        `json:"down"`
 	Up              uint64        `json:"up"`
@@ -589,11 +618,11 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		cats := mapToShares(sc.cats)
-		devKind := deviceKind(name)
+		devKind := s.resolveDeviceKind(name)
 		total := sc.down + sc.up
 		v := classify(sc.series, startMinute, total, cats, devKind, lastTLS[name], lastDNS[name], now, loggerOK)
 		entry := apiSnapshotClient{
-			Name: name, DeviceKind: devKind,
+			Name: name, Person: s.aliases.Person(name), DeviceKind: devKind,
 			Down: sc.down, Up: sc.up, Total: total,
 			MinutesOver100K: sc.minOver100k, MinutesOver1MB: sc.minOver1mb,
 			Cats: cats, RecentSites: sites[name], Verdict: v,
@@ -919,7 +948,7 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	series := s.seriesByClient(from, to)[name]
 	cats := mapToShares(cat)
 	loggerOK := s.loggerHealthy()
-	devKind := deviceKind(name)
+	devKind := s.resolveDeviceKind(name)
 	// Reuse the recent lists (newest first) for freshness — reaches back further
 	// than the window, so "last seen" survives a short window.
 	var lastTLS, lastDNS time.Time
@@ -951,6 +980,7 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		"recent_tls":  recentTLS,
 		"day":         s.clientDayTimeline(name),
 		"device_kind": devKind,
+		"person":      s.aliases.Person(name),
 		"logger_ok":   loggerOK,
 		"verdict":     verdict,
 	})

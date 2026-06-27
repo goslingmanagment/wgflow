@@ -1,0 +1,22 @@
+# wgflow client aliases — group WireGuard peers into people.
+#
+# Optional. Without it, wgflow groups by the name prefix before the first "-"
+# (so "diana-iphone" and "diana-macbook" still land under "diana"), and guesses
+# device kind from the name suffix. This file lets you set real display names,
+# fix grouping for odd/hyphenless names, list devices so silent ones still show
+# on the board, and override the device-kind guess.
+#
+# Point the web server at it:  wgflow web --clients-config /etc/wgflow/clients.yaml
+
+people:
+  - display: Diana
+    devices:
+      - diana-iphone
+      - diana-macbook
+  - display: Mom            # display names may be Cyrillic, spaces, anything
+    devices:
+      - mom-macbook
+
+# Override the phone/laptop guess for peers the name suffix gets wrong.
+device_kind:
+  mom-macbook: laptop
