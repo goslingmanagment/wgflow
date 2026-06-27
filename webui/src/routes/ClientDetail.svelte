@@ -124,29 +124,34 @@
       <div class="ch"><h3 class="serif">Top targets</h3><span class="hint mono" title="Wire bytes are ~94–95% of these totals; packet counts are approximate (GSO/GRO coalescing).">~94–95% (GSO/GRO)</span></div>
       <div class="tscroll">
         <table class="t">
-          <thead><tr><th>Target</th><th>Cat</th><th class="r">Down</th><th class="r">Up</th></tr></thead>
+          <thead><tr><th>App</th><th>Infra</th><th>Cat</th><th class="r">Down</th><th class="r">Up</th></tr></thead>
           <tbody>
             {#each data.top_targets.slice(0, 8) as t}
               <tr class:bg={t.category === 'apple'}>
-                <td class="tgt" title={t.resolved_target ? `${t.resolved_target} · ${t.target}` : t.target}>
-                  <span class="target-main">{t.resolved_target || t.target}</span>
-                  {#if t.resolved_target || t.is_ip || t.target_org}
+                <td class="app" title={t.app_target || (!t.is_ip ? t.target : '')}>
+                  <span class="target-main">{t.app_target || (!t.is_ip ? t.target : '—')}</span>
+                  {#if t.attribution_source}
                     <span class="target-meta">
-                      {#if t.resolved_target}
-                        <span>{t.target}</span>
-                      {:else if t.is_ip}
-                        <span>no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>
+                      <span>{t.attribution_source}</span>
+                      {#if t.attribution_candidates?.length > 1}
+                        <span class="org" title={t.attribution_candidates.join(', ')}>+{t.attribution_candidates.length - 1}</span>
                       {/if}
-                      {#if t.target_org}<span class="org">{t.target_org}</span>{/if}
                     </span>
                   {/if}
+                </td>
+                <td class="infra" title={t.resolved_target ? `${t.target} · ${t.resolved_target}` : t.target}>
+                  <span class="target-main">{t.is_ip ? t.target : 'direct'}</span>
+                  <span class="target-meta">
+                    {#if t.resolved_target}<span>{t.resolved_target}</span>{:else if t.is_ip}<span>no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}
+                    {#if t.target_org}<span class="org">{t.target_org}</span>{/if}
+                  </span>
                 </td>
                 <td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">push/OCSP?</span>{/if}</td>
                 <td class="r mono">{fmtBytes(t.down)}</td>
                 <td class="r mono">{fmtBytes(t.up)}</td>
               </tr>
             {/each}
-            {#if data.top_targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
+            {#if data.top_targets.length === 0}<tr><td colspan="5" class="empty">No traffic in this window.</td></tr>{/if}
           </tbody>
         </table>
       </div>
@@ -286,7 +291,8 @@
     font-size: 11px;
     margin: -6px 0 14px;
   }
-  .t td.tgt {
+  .t td.app,
+  .t td.infra {
     white-space: normal;
     overflow: visible;
   }
@@ -306,6 +312,11 @@
     font-size: 10.5px;
     white-space: nowrap;
   }
+  .target-meta > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .org {
     color: var(--color-muted);
     border: 1px solid var(--color-border);
@@ -320,7 +331,8 @@
     font-size: 10px;
     cursor: help;
   }
-  tr.bg .tgt {
+  tr.bg .app,
+  tr.bg .infra {
     color: var(--color-dim);
   }
   .card {
@@ -364,6 +376,7 @@
   }
   table.t {
     width: 100%;
+    min-width: 560px;
     border-collapse: collapse;
     font-size: 12.5px;
     table-layout: fixed;
@@ -388,9 +401,6 @@
   }
   .r {
     text-align: right;
-  }
-  .tgt {
-    color: var(--color-text);
   }
   .li {
     display: flex;
@@ -466,9 +476,6 @@
       font-size: 18px;
     }
     /* keep the targets table readable: scroll horizontally rather than crush it */
-    table.t {
-      min-width: 420px;
-    }
     .anchor input {
       flex: 1 1 140px;
       width: auto;

@@ -306,6 +306,30 @@ func TestNewAPIFlowEnrichesKnownBareIPs(t *testing.T) {
 	if cloudfront.TargetOrg != "Amazon CloudFront" {
 		t.Fatalf("cloudfront target org = %q", cloudfront.TargetOrg)
 	}
+
+	attributed := newAPIFlowWithAttribution(&TopAgg{
+		Client:   "diana-macbook",
+		Category: "aws",
+		Target:   "3.171.214.100",
+		Proto:    "tcp",
+		Port:     443,
+		Down:     10,
+	}, map[string]apiFlowAttribution{
+		flowAttributionKey("diana-macbook", "3.171.214.100"): {
+			AppTarget:  "apiv3.fansly.com",
+			Source:     "TLS SNI",
+			Candidates: []string{"apiv3.fansly.com"},
+		},
+	})
+	if attributed.Category != "fansly" {
+		t.Fatalf("attributed category = %q, want fansly", attributed.Category)
+	}
+	if attributed.AppTarget != "apiv3.fansly.com" {
+		t.Fatalf("attributed app target = %q", attributed.AppTarget)
+	}
+	if attributed.AttributionSource != "TLS SNI" {
+		t.Fatalf("attribution source = %q", attributed.AttributionSource)
+	}
 }
 
 func TestParseTLSSNI(t *testing.T) {

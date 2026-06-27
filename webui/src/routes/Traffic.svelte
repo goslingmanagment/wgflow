@@ -54,20 +54,27 @@
   <div class="card">
     <div class="tscroll">
       <table>
-        <thead><tr><th>Client</th><th>Category</th><th>Target</th><th>Proto</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th></tr></thead>
+        <thead><tr><th>Client</th><th>Category</th><th>App</th><th>Infra</th><th>Proto</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th></tr></thead>
         <tbody>
           {#each data.rows as f}
             <tr>
               <td><a href="#/clients/{encodeURIComponent(f.client)}">{f.client}</a></td>
               <td><span class="cd" style="background:{catColor(f.category)}"></span>{f.category}</td>
-              <td class="tgt" title={f.resolved_target ? `${f.resolved_target} · ${f.target}` : f.target}>
-                <span class="target-main">{f.resolved_target || f.target}</span>
-                {#if f.resolved_target || f.target_org}
+              <td class="app" title={f.app_target || (!f.is_ip ? f.target : '')}>
+                <span class="target-main">{f.app_target || (!f.is_ip ? f.target : '—')}</span>
+                {#if f.attribution_source}
                   <span class="target-meta">
-                    {#if f.resolved_target}<span>{f.target}</span>{/if}
-                    {#if f.target_org}<span class="org">{f.target_org}</span>{/if}
+                    <span>{f.attribution_source}</span>
+                    {#if f.attribution_candidates?.length > 1}<span class="org" title={f.attribution_candidates.join(', ')}>+{f.attribution_candidates.length - 1}</span>{/if}
                   </span>
                 {/if}
+              </td>
+              <td class="infra" title={f.resolved_target ? `${f.target} · ${f.resolved_target}` : f.target}>
+                <span class="target-main">{f.is_ip ? f.target : 'direct'}</span>
+                <span class="target-meta">
+                  {#if f.resolved_target}<span>{f.resolved_target}</span>{:else if f.is_ip}<span>no hostname{f.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}
+                  {#if f.target_org}<span class="org">{f.target_org}</span>{/if}
+                </span>
               </td>
               <td class="mono dim">{f.proto}:{f.port}</td>
               <td class="r mono">{fmtBytes(f.down)}</td>
@@ -94,15 +101,16 @@
   .bar { color: var(--color-muted); font-size: 12px; margin-bottom: 8px; }
   .card { background: var(--color-s1); border: 1px solid var(--color-border); border-radius: 12px; overflow: hidden; }
   .tscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-  table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
+  table { width: 100%; min-width: 860px; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
   th { text-align: left; color: var(--color-muted); font-weight: 400; font-size: 11px; padding: 9px 8px; border-bottom: 1px solid var(--color-border); }
   td { padding: 9px 8px; border-bottom: 1px solid var(--color-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   tr:last-child td { border-bottom: 0; }
   td a:hover { color: var(--color-coral); }
   .r { text-align: right; }
-  td.tgt { color: var(--color-text); white-space: normal; overflow: visible; }
+  td.app, td.infra { color: var(--color-text); white-space: normal; overflow: visible; }
   .target-main { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .target-meta { display: flex; align-items: center; gap: 5px; min-height: 14px; overflow: hidden; color: var(--color-muted); font-size: 10.5px; white-space: nowrap; }
+  .target-meta > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .org { color: var(--color-muted); border: 1px solid var(--color-border); border-radius: 4px; padding: 0 4px; font-size: 10px; flex: 0 0 auto; }
   .dim { color: var(--color-muted); }
   .cd { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
@@ -110,11 +118,12 @@
   .pad { padding: 16px; }
   th:nth-child(1), td:nth-child(1) { width: 16%; }
   th:nth-child(2), td:nth-child(2) { width: 14%; }
-  th:nth-child(4), td:nth-child(4) { width: 12%; }
-  th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) { width: 11%; }
+  th:nth-child(4), td:nth-child(4) { width: 20%; }
+  th:nth-child(5), td:nth-child(5) { width: 10%; }
+  th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7), th:nth-child(8), td:nth-child(8) { width: 10%; }
   @media (max-width: 640px) {
     .pgwin { display: none; } /* the sticky header already carries the window picker */
-    table { min-width: 600px; }
+    table { min-width: 760px; }
     th, td { padding: 8px 7px; }
     input { flex: 1 1 140px; width: auto; }
   }

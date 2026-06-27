@@ -237,16 +237,19 @@ type apiCatShare struct {
 }
 
 type apiFlow struct {
-	Client         string `json:"client"`
-	Category       string `json:"category"`
-	Target         string `json:"target"`
-	ResolvedTarget string `json:"resolved_target,omitempty"`
-	TargetOrg      string `json:"target_org,omitempty"`
-	Proto          string `json:"proto"`
-	Port           uint16 `json:"port"`
-	Down           uint64 `json:"down"`
-	Up             uint64 `json:"up"`
-	Total          uint64 `json:"total"`
+	Client                string   `json:"client"`
+	Category              string   `json:"category"`
+	Target                string   `json:"target"`
+	AppTarget             string   `json:"app_target,omitempty"`
+	ResolvedTarget        string   `json:"resolved_target,omitempty"`
+	TargetOrg             string   `json:"target_org,omitempty"`
+	AttributionSource     string   `json:"attribution_source,omitempty"`
+	AttributionCandidates []string `json:"attribution_candidates,omitempty"`
+	Proto                 string   `json:"proto"`
+	Port                  uint16   `json:"port"`
+	Down                  uint64   `json:"down"`
+	Up                    uint64   `json:"up"`
+	Total                 uint64   `json:"total"`
 	// IsIP marks a target we could not resolve to a hostname (no SNI, no DNS) —
 	// usually QUIC. The UI labels these "no hostname (QUIC)" instead of showing a
 	// bare IP that reads like a fabricated or missing domain.
@@ -254,9 +257,28 @@ type apiFlow struct {
 }
 
 func newAPIFlow(a *TopAgg) apiFlow {
+	return newAPIFlowWithAttribution(a, nil)
+}
+
+func newAPIFlowWithAttribution(a *TopAgg, attrs map[string]apiFlowAttribution) apiFlow {
 	resolved, org := enrichTarget(a.Target, "", a.Proto, a.Port)
+	isIP := net.ParseIP(a.Target) != nil
+	var appTarget, attrSource string
+	var attrCandidates []string
+	if isIP && attrs != nil {
+		if attr := attrs[flowAttributionKey(a.Client, a.Target)]; attr.AppTarget != "" {
+			appTarget = attr.AppTarget
+			attrSource = attr.Source
+			attrCandidates = attr.Candidates
+		}
+	}
+	if !isIP {
+		appTarget = a.Target
+	}
 	targetForCat := a.Target
-	if resolved != "" {
+	if appTarget != "" {
+		targetForCat = appTarget
+	} else if resolved != "" {
 		targetForCat = resolved
 	}
 	category := a.Category
@@ -267,16 +289,160 @@ func newAPIFlow(a *TopAgg) apiFlow {
 		category = better
 	}
 	return apiFlow{
-		Client: a.Client, Category: category, Target: a.Target, ResolvedTarget: resolved, TargetOrg: org, Proto: a.Proto, Port: a.Port,
-		Down: a.Down, Up: a.Up, Total: a.Down + a.Up, IsIP: net.ParseIP(a.Target) != nil,
+		Client: a.Client, Category: category, Target: a.Target, AppTarget: appTarget, ResolvedTarget: resolved, TargetOrg: org,
+		AttributionSource: attrSource, AttributionCandidates: attrCandidates, Proto: a.Proto, Port: a.Port,
+		Down: a.Down, Up: a.Up, Total: a.Down + a.Up, IsIP: isIP,
 	}
 }
 
 func apiFlowDisplayTarget(f apiFlow) string {
+	if f.AppTarget != "" {
+		return f.AppTarget
+	}
 	if f.ResolvedTarget != "" {
 		return f.ResolvedTarget
 	}
 	return f.Target
+}
+
+type apiFlowAttribution struct {
+	AppTarget  string
+	Source     string
+	Candidates []string
+}
+
+type attributionCandidate struct {
+	Domain   string
+	Source   string
+	Hits     int
+	Priority int
+	Last     time.Time
+}
+
+func flowAttributionKey(client, ip string) string {
+	return client + "\t" + ip
+}
+
+func (s *webServer) flowAttributions(from, to time.Time, clientFilter string) map[string]apiFlowAttribution {
+	// DNS/SNI often happen before the byte-heavy flow window. The first two hours
+	// are strong evidence; older matches are a low-priority fallback for CDN IPs
+	// whose connection outlives the visible handshakes.
+	strongCutoff := from.Add(-2 * time.Hour)
+	cutoff := from.Add(-6 * time.Hour)
+	type candMap map[string]*attributionCandidate
+	byFlow := map[string]candMap{}
+	add := func(client, ip, domain, source string, priority int, ts time.Time) {
+		domain = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+		if client == "" || net.ParseIP(ip) == nil || domain == "" || net.ParseIP(domain) != nil {
+			return
+		}
+		k := flowAttributionKey(client, ip)
+		m := byFlow[k]
+		if m == nil {
+			m = candMap{}
+			byFlow[k] = m
+		}
+		c := m[domain]
+		if c == nil {
+			c = &attributionCandidate{Domain: domain, Source: source, Priority: priority, Last: ts}
+			m[domain] = c
+		}
+		c.Hits++
+		if priority > c.Priority {
+			c.Priority = priority
+			c.Source = source
+		}
+		if ts.After(c.Last) {
+			c.Last = ts
+		}
+	}
+
+	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+		var rec TLSRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.After(to) {
+			return true
+		}
+		if rec.TS.Before(cutoff) {
+			return false
+		}
+		if clientFilter != "" && rec.Client != clientFilter {
+			return true
+		}
+		source := "TLS SNI"
+		priority := 3
+		if rec.Protocol == "quic" {
+			source = "QUIC SNI"
+		}
+		if rec.TS.Before(strongCutoff) {
+			source = "historical " + source
+			priority = 1
+		}
+		add(rec.Client, rec.RemoteIP, rec.ServerName, source, priority, rec.TS)
+		return true
+	})
+
+	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+		var rec DNSRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.After(to) {
+			return true
+		}
+		if rec.TS.Before(cutoff) {
+			return false
+		}
+		if clientFilter != "" && rec.Client != clientFilter {
+			return true
+		}
+		for _, ans := range rec.Answers {
+			if ans.Type == "A" || ans.Type == "AAAA" {
+				source := "DNS answer"
+				priority := 2
+				if rec.TS.Before(strongCutoff) {
+					source = "historical DNS answer"
+					priority = 1
+				}
+				add(rec.Client, ans.Value, rec.Query, source, priority, rec.TS)
+			}
+		}
+		return true
+	})
+
+	out := map[string]apiFlowAttribution{}
+	for k, candidates := range byFlow {
+		rows := make([]*attributionCandidate, 0, len(candidates))
+		for _, c := range candidates {
+			rows = append(rows, c)
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].Priority != rows[j].Priority {
+				return rows[i].Priority > rows[j].Priority
+			}
+			if rows[i].Hits != rows[j].Hits {
+				return rows[i].Hits > rows[j].Hits
+			}
+			if !rows[i].Last.Equal(rows[j].Last) {
+				return rows[i].Last.After(rows[j].Last)
+			}
+			return rows[i].Domain < rows[j].Domain
+		})
+		if len(rows) == 0 {
+			continue
+		}
+		names := make([]string, 0, min(len(rows), 4))
+		for _, c := range rows {
+			names = append(names, c.Domain)
+			if len(names) >= 4 {
+				break
+			}
+		}
+		out[k] = apiFlowAttribution{AppTarget: rows[0].Domain, Source: rows[0].Source, Candidates: names}
+	}
+	return out
 }
 
 type apiClient struct {
@@ -927,11 +1093,12 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	recentCutoff := to.Add(-recentLookback)
 	aggList := s.clientFlowsWindow(name, from, to)
+	attrs := s.flowAttributions(from, to, name)
 	var down, up uint64
 	cat := map[string]uint64{}
 	targets := make([]apiFlow, 0, len(aggList))
 	for _, a := range aggList {
-		f := newAPIFlow(a)
+		f := newAPIFlowWithAttribution(a, attrs)
 		down += a.Down
 		up += a.Up
 		cat[f.Category] += f.Total
@@ -1308,7 +1475,8 @@ func (s *webServer) clientDayTimelineFromIndex(name string, buckets []apiHour) b
 
 func (s *webServer) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	d := parseSince(r, 15*time.Minute)
-	cutoff := time.Now().Add(-d)
+	now := time.Now()
+	cutoff := now.Add(-d)
 	q := r.URL.Query()
 	clientFilter := q.Get("client")
 	catFilter := q.Get("category")
@@ -1317,16 +1485,17 @@ func (s *webServer) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	limit := atoiDefault(q.Get("limit"), 50)
 	aggs := map[string]*TopAgg{}
 	aggregateFromRollup(s.rollupPath, cutoff, clientFilter, aggs)
+	attrs := s.flowAttributions(cutoff, now, clientFilter)
 	rows := make([]apiFlow, 0, len(aggs))
 	for _, a := range aggs {
-		f := newAPIFlow(a)
+		f := newAPIFlowWithAttribution(a, attrs)
 		if catFilter != "" && catFilter != "all" && f.Category != catFilter {
 			continue
 		}
 		if protoFilter != "" && protoFilter != "all" && f.Proto != protoFilter {
 			continue
 		}
-		searchText := strings.ToLower(f.Target + " " + f.ResolvedTarget + " " + f.TargetOrg)
+		searchText := strings.ToLower(f.Target + " " + f.AppTarget + " " + f.ResolvedTarget + " " + f.TargetOrg)
 		if search != "" && !strings.Contains(searchText, search) {
 			continue
 		}
@@ -1351,9 +1520,11 @@ type apiCategory struct {
 
 func (s *webServer) handleCategories(w http.ResponseWriter, r *http.Request) {
 	d := parseSince(r, 15*time.Minute)
-	cutoff := time.Now().Add(-d)
+	now := time.Now()
+	cutoff := now.Add(-d)
 	aggs := map[string]*TopAgg{}
 	aggregateFromRollup(s.rollupPath, cutoff, "", aggs)
+	attrs := s.flowAttributions(cutoff, now, "")
 	type acc struct {
 		down, up uint64
 		clients  map[string]uint64
@@ -1361,7 +1532,7 @@ func (s *webServer) handleCategories(w http.ResponseWriter, r *http.Request) {
 	}
 	m := map[string]*acc{}
 	for _, a := range aggs {
-		f := newAPIFlow(a)
+		f := newAPIFlowWithAttribution(a, attrs)
 		x := m[f.Category]
 		if x == nil {
 			x = &acc{clients: map[string]uint64{}, targets: map[string]uint64{}}
