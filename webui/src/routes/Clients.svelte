@@ -4,6 +4,7 @@
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
   import Icon from '../lib/Icon.svelte'
+  import HealthPill from '../lib/HealthPill.svelte'
 
   let data = $state(null)
   let err = $state(null)
@@ -33,7 +34,7 @@
 </script>
 
 <div class="head">
-  <h1 class="serif">Clients <span class="live"><span class="dot pulse"></span>live</span></h1>
+  <h1 class="serif">Clients <HealthPill /></h1>
   <div class="tools">
     <button class:on={sort === 'total'} onclick={() => (sort = 'total')}>volume</button>
     <button class:on={sort === 'name'} onclick={() => (sort = 'name')}>name</button>
@@ -88,23 +89,6 @@
     display: flex;
     align-items: center;
     gap: 10px;
-  }
-  .live {
-    font-size: 11px;
-    color: var(--color-ok);
-    background: color-mix(in srgb, var(--color-ok) 14%, transparent);
-    padding: 2px 9px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font-family: var(--font-sans);
-  }
-  .live .dot {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-ok);
   }
   .tools {
     display: flex;

@@ -1,8 +1,10 @@
 <script>
   import { onMount } from 'svelte'
   import { hhmmssMSK } from './lib/format.js'
+  import { onStats, onStreamError, refreshHealth } from './lib/store.svelte.js'
   import Icon from './lib/Icon.svelte'
   import Win from './lib/Win.svelte'
+  import HealthPill from './lib/HealthPill.svelte'
   import Clients from './routes/Clients.svelte'
   import ClientDetail from './routes/ClientDetail.svelte'
   import Overview from './routes/Overview.svelte'
@@ -35,29 +37,36 @@
   const Current = $derived(route.name === 'clients' && route.param ? ClientDetail : ROUTES[route.name] || Clients)
   const activeNav = $derived(route.name === 'clients' && route.param ? 'clients' : route.name)
 
-  let live = $state(null)
   let now = $state(new Date())
   onMount(() => {
     const onHash = () => (route = parse())
     addEventListener('hashchange', onHash)
-    const clock = setInterval(() => (now = new Date()), 1000)
+    // 1s heartbeat: advances the wall-clock AND re-derives logger health, so a
+    // dead stream/logger decays to stale/down on its own (the old pill never did).
+    const clock = setInterval(() => {
+      now = new Date()
+      refreshHealth()
+    }, 1000)
     let es
     try {
       es = new EventSource('/api/stats/stream')
       es.addEventListener('stats', (e) => {
         try {
-          live = JSON.parse(e.data)
+          onStats(JSON.parse(e.data))
         } catch {}
       })
-    } catch {}
+      // EventSource auto-reconnects on error; surface the drop immediately so the
+      // pill reflects it without waiting for the next tick.
+      es.onerror = () => onStreamError()
+    } catch {
+      onStreamError()
+    }
     return () => {
       removeEventListener('hashchange', onHash)
       clearInterval(clock)
       es && es.close()
     }
   })
-
-  const mbit = $derived(live ? (live.bit_rate_per_second / 1e6).toFixed(1) : null)
 </script>
 
 <div class="shell">
@@ -74,10 +83,7 @@
       <div class="right">
         <span class="clock mono" title="Текущее время МСК">{hhmmssMSK(now)}<small>МСК</small></span>
         <Win />
-        <span class="live" class:off={!live}>
-          <span class="dot pulse"></span>
-          {#if mbit}{mbit}<small>Mbit/s</small>{:else}offline{/if}
-        </span>
+        <HealthPill rate />
       </div>
     </header>
     <main class="main">
@@ -171,31 +177,6 @@
     color: var(--color-muted);
     font-size: 10px;
     margin-left: 3px;
-  }
-  .live {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    font-family: var(--font-mono);
-    font-size: 13px;
-    color: var(--color-ok);
-    background: color-mix(in srgb, var(--color-ok) 14%, transparent);
-    padding: 4px 10px;
-    border-radius: 999px;
-  }
-  .live small {
-    color: var(--color-dim);
-    font-size: 11px;
-  }
-  .live.off {
-    color: var(--color-muted);
-    background: var(--color-s2);
-  }
-  .live .dot {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: currentColor;
   }
   .main {
     padding: 18px 20px 40px;

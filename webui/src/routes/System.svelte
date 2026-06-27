@@ -1,5 +1,6 @@
 <script>
   import { getJSON, fmtBytes, fmtShort, uptime, ago } from '../lib/format.js'
+  import HealthPill from '../lib/HealthPill.svelte'
 
   let data = $state(null)
   let err = $state(null)
@@ -27,7 +28,7 @@
   const maxStore = $derived(Math.max(1, ...storage.map((s) => s[1])))
 </script>
 
-<div class="head"><h1 class="serif">System</h1>{#if data}<span class="ok"><span class="d"></span>healthy</span>{/if}</div>
+<div class="head"><h1 class="serif">System</h1><HealthPill /></div>
 
 {#if err}<p class="err">Couldn't load system. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
   <div class="grid">
@@ -65,8 +66,6 @@
 <style>
   .head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
   h1 { font-size: 22px; font-weight: 500; margin: 0; }
-  .ok { font-size: 11px; color: var(--color-ok); background: color-mix(in srgb, var(--color-ok) 14%, transparent); padding: 3px 10px; border-radius: 999px; display: inline-flex; align-items: center; gap: 6px; }
-  .ok .d { width: 6px; height: 6px; border-radius: 50%; background: var(--color-ok); }
   .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
   .card { background: var(--color-s1); border: 1px solid var(--color-border); border-radius: 12px; padding: 14px 16px; }

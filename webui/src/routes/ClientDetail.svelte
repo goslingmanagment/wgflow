@@ -4,6 +4,7 @@
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
+  import HealthPill from '../lib/HealthPill.svelte'
 
   let { param } = $props()
   let data = $state(null)
@@ -42,7 +43,7 @@
 {:else}
   <div class="who">
     <h1 class="serif">{data.name}</h1>
-    <span class="chip"><span class="d pulse"></span>active now</span>
+    <HealthPill />
   </div>
 
   <div class="kpis">
@@ -114,22 +115,6 @@
     font-size: 24px;
     font-weight: 500;
     margin: 0;
-  }
-  .chip {
-    font-size: 11px;
-    color: var(--color-ok);
-    background: color-mix(in srgb, var(--color-ok) 14%, transparent);
-    padding: 3px 10px;
-    border-radius: 999px;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-  }
-  .chip .d {
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--color-ok);
   }
   .kpis {
     display: grid;
