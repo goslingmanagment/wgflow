@@ -60,6 +60,31 @@ export function uptime(startedAt) {
   return h + 'h ' + m + 'm'
 }
 
+// Moscow wall-clock formatters. The owner reads every window "at HH:MM МСК",
+// so all absolute times render in Europe/Moscow regardless of the viewer's TZ.
+// Moscow is UTC+3 year-round (no DST since 2014), but we resolve it through the
+// tz database via Intl rather than hardcoding +3.
+const _mskHM = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit' })
+const _mskHMS = new Intl.DateTimeFormat('ru-RU', { timeZone: 'Europe/Moscow', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+const _mskHour = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/Moscow', hour: 'numeric', hour12: false })
+
+// Accept a Date, unix-seconds number (the series/chart convention), or ISO string.
+function toDate(ts) {
+  if (ts instanceof Date) return ts
+  if (typeof ts === 'number') return new Date(ts * 1000)
+  return new Date(ts)
+}
+export function hhmmMSK(ts) {
+  return _mskHM.format(toDate(ts))
+}
+export function hhmmssMSK(ts) {
+  return _mskHMS.format(toDate(ts))
+}
+// MSK hour 0–23 (handles the Intl "24" midnight quirk).
+export function hourMSK(d = new Date()) {
+  return Number(_mskHour.format(d)) % 24
+}
+
 export function dnsRcodeName(code) {
   const names = {
     0: 'NOERROR',

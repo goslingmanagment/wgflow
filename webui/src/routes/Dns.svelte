@@ -1,6 +1,6 @@
 <script>
   import { ui } from '../lib/store.svelte.js'
-  import { dnsRcodeName, getJSON } from '../lib/format.js'
+  import { dnsRcodeName, getJSON, hhmmssMSK } from '../lib/format.js'
   import Win from '../lib/Win.svelte'
 
   let data = $state(null)
@@ -28,9 +28,6 @@
       err = e2.message
     }
   }
-  function hhmmss(ts) {
-    return new Date(ts).toLocaleTimeString('en-GB')
-  }
   const QT = ['all', 'A', 'AAAA', 'CNAME', 'HTTPS']
 </script>
 
@@ -45,11 +42,11 @@
   <div class="bar">last {ui.since} · {data.records.length} shown · <span class="warn">{data.errors} DNS errors</span></div>
   <div class="card">
     <table>
-      <thead><tr><th>Time</th><th>Client</th><th>Query</th><th>Type</th><th>Code</th><th>Answer</th></tr></thead>
+      <thead><tr><th>Time МСК</th><th>Client</th><th>Query</th><th>Type</th><th>Code</th><th>Answer</th></tr></thead>
       <tbody>
         {#each data.records as r}
           <tr>
-            <td class="mono dim">{hhmmss(r.ts)}</td>
+            <td class="mono dim">{hhmmssMSK(r.ts)}</td>
             <td>{r.client}</td>
             <td class="q">{r.query}</td>
             <td><span class="qt mono">{r.qtype}</span></td>

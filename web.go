@@ -25,6 +25,23 @@ import (
 //go:embed all:webui/dist
 var webAssets embed.FS
 
+// mskLocation pins server-side hour bucketing to Moscow time so the day timeline
+// never leaks the host TZ. Moscow has had no DST since 2014, so the FixedZone
+// fallback (for hosts shipped without tzdata) stays correct.
+var mskLocation = loadMSK()
+
+func loadMSK() *time.Location {
+	if loc, err := time.LoadLocation("Europe/Moscow"); err == nil {
+		return loc
+	}
+	return time.FixedZone("MSK", 3*60*60)
+}
+
+// mskHour maps a unix-minute bucket to its hour-of-day (0–23) in Moscow time.
+func mskHour(unixMinute int64) int {
+	return time.Unix(unixMinute*60, 0).In(mskLocation).Hour()
+}
+
 type webServer struct {
 	logDir     string
 	rollupPath string
@@ -507,7 +524,7 @@ func (s *webServer) clientDayTimeline(name string) []apiHour {
 			if row.Minute < cutoffMinute || row.Client != name {
 				continue
 			}
-			h := time.Unix(row.Minute*60, 0).Hour()
+			h := mskHour(row.Minute)
 			bt := row.DownloadBytes + row.UploadBytes
 			buckets[h].Cats[row.Category] += bt
 			buckets[h].Total += bt
@@ -544,7 +561,7 @@ func (s *webServer) clientDayTimelineFromIndex(name string, buckets []apiHour) b
 				continue
 			}
 			total := decodeRollupTotalValue(v)
-			h := time.Unix(minute*60, 0).Hour()
+			h := mskHour(minute)
 			bt := total.DownloadBytes + total.UploadBytes
 			buckets[h].Cats[parts[2]] += bt
 			buckets[h].Total += bt

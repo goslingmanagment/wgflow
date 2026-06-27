@@ -1,6 +1,6 @@
 <script>
   import { ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName } from '../lib/format.js'
+  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK } from '../lib/format.js'
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
@@ -78,14 +78,14 @@
       </table>
     </div>
     <div class="card">
-      <div class="ch"><h3 class="serif">Recent sites</h3><span class="hint">TLS</span></div>
+      <div class="ch"><h3 class="serif">Recent sites</h3><span class="hint">TLS · МСК</span></div>
       {#each data.recent_tls.slice(0, 6) as r}
-        <div class="li"><Icon name="lock" size={13} /><span class="g">{r.server_name}</span><span class="ago mono">{ago(r.ts)}</span></div>
+        <div class="li"><Icon name="lock" size={13} /><span class="g">{r.server_name}</span><span class="ago mono">{hhmmMSK(r.ts)}</span></div>
       {/each}
       {#if data.recent_tls.length === 0}<div class="empty">No TLS connections recently.</div>{/if}
-      <div class="ch" style="margin-top:12px"><h3 class="serif">Recent DNS</h3></div>
+      <div class="ch" style="margin-top:12px"><h3 class="serif">Recent DNS</h3><span class="hint">МСК</span></div>
       {#each data.recent_dns.slice(0, 6) as r}
-        <div class="li"><span class="qt mono">{r.qtype}</span><span class="g">{r.query}</span>{#if r.rcode !== 0}<span class="nx">{dnsRcodeName(r.rcode)}</span>{:else}<span class="ago mono">{ago(r.ts)}</span>{/if}</div>
+        <div class="li"><span class="qt mono">{r.qtype}</span><span class="g">{r.query}</span>{#if r.rcode !== 0}<span class="nx">{dnsRcodeName(r.rcode)}</span>{:else}<span class="ago mono">{hhmmMSK(r.ts)}</span>{/if}</div>
       {/each}
       {#if data.recent_dns.length === 0}<div class="empty">No DNS queries recently — likely cached or encrypted (DoH/DoT).</div>{/if}
     </div>

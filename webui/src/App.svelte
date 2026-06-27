@@ -1,5 +1,6 @@
 <script>
   import { onMount } from 'svelte'
+  import { hhmmssMSK } from './lib/format.js'
   import Icon from './lib/Icon.svelte'
   import Win from './lib/Win.svelte'
   import Clients from './routes/Clients.svelte'
@@ -35,9 +36,11 @@
   const activeNav = $derived(route.name === 'clients' && route.param ? 'clients' : route.name)
 
   let live = $state(null)
+  let now = $state(new Date())
   onMount(() => {
     const onHash = () => (route = parse())
     addEventListener('hashchange', onHash)
+    const clock = setInterval(() => (now = new Date()), 1000)
     let es
     try {
       es = new EventSource('/api/stats/stream')
@@ -49,6 +52,7 @@
     } catch {}
     return () => {
       removeEventListener('hashchange', onHash)
+      clearInterval(clock)
       es && es.close()
     }
   })
@@ -68,6 +72,7 @@
     <header class="top">
       <div class="brand serif">wgflow<span>.</span></div>
       <div class="right">
+        <span class="clock mono" title="Текущее время МСК">{hhmmssMSK(now)}<small>МСК</small></span>
         <Win />
         <span class="live" class:off={!live}>
           <span class="dot pulse"></span>
@@ -155,6 +160,17 @@
     display: flex;
     align-items: center;
     gap: 12px;
+  }
+  .clock {
+    font-size: 13px;
+    color: var(--color-dim);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .clock small {
+    color: var(--color-muted);
+    font-size: 10px;
+    margin-left: 3px;
   }
   .live {
     display: inline-flex;

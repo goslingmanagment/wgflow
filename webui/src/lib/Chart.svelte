@@ -2,6 +2,7 @@
   import uPlot from 'uplot'
   import 'uplot/dist/uPlot.min.css'
   import { onMount } from 'svelte'
+  import { hhmmMSK } from './format.js'
 
   let { points = [], color = '#e06a3f', unit = 'Mbit/s', height = 200 } = $props()
 
@@ -12,9 +13,8 @@
   function toData(pts) {
     return [pts.map((p) => p.t), pts.map((p) => p.v)]
   }
-  function fmtT(t) {
-    return new Date(t * 1000).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' })
-  }
+  // Axis/tooltip clock is pinned to MSK (t is unix seconds).
+  const fmtT = hhmmMSK
 
   function makeOpts(w) {
     const axis = {

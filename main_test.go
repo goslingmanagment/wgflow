@@ -98,9 +98,31 @@ func TestRollupPreservesDownloadUploadDirection(t *testing.T) {
 
 	srv := &webServer{rollupPath: path}
 	day := srv.clientDayTimeline("alice")
-	hour := base.Hour()
+	hour := base.In(mskLocation).Hour()
 	if day[hour].Total != 1540 || day[hour].Cats["other"] != 1540 {
 		t.Fatalf("alice day bucket = total=%d other=%d", day[hour].Total, day[hour].Cats["other"])
+	}
+}
+
+func TestMSKHourBucketing(t *testing.T) {
+	// Host-independent: each UTC instant must land in its Moscow (UTC+3) hour
+	// bucket no matter what TZ the test process runs under.
+	cases := []struct {
+		utc  string
+		want int
+	}{
+		{"2026-01-15T23:30:00Z", 2},  // 02:30 MSK next day
+		{"2026-06-15T21:00:00Z", 0},  // 00:00 MSK next day
+		{"2026-06-15T09:15:00Z", 12}, // 12:15 MSK
+	}
+	for _, tc := range cases {
+		ts, err := time.Parse(time.RFC3339, tc.utc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := mskHour(ts.Unix() / 60); got != tc.want {
+			t.Fatalf("mskHour(%s) = %d, want %d", tc.utc, got, tc.want)
+		}
 	}
 }
 

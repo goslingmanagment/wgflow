@@ -1,10 +1,11 @@
 <script>
-  import { fmtBytes, catColor } from './format.js'
+  import { fmtBytes, catColor, hourMSK } from './format.js'
   let { day = [] } = $props()
 
   const max = $derived(Math.max(1, ...day.map((h) => Number(h.total) || 0)))
   const total = $derived(day.reduce((s, h) => s + (Number(h.total) || 0), 0))
-  const nowHour = new Date().getHours()
+  // Buckets are MSK hours (server-side); the "now" marker must match.
+  const nowHour = hourMSK()
   let hover = $state(-1)
 
   function segs(h) {
@@ -48,7 +49,7 @@
 
     {#if hover >= 0 && day[hover]}
       <div class="tip" class:left={hover >= 12}>
-        <div class="th">{String(hover).padStart(2, '0')}:00 – {String(hover).padStart(2, '0')}:59</div>
+        <div class="th">{String(hover).padStart(2, '0')}:00 – {String(hover).padStart(2, '0')}:59 МСК</div>
         <div class="tt">{fmtBytes(day[hover].total)}</div>
         {#each segs(day[hover]) as s}
           <div class="tr"><span class="dot" style="background:{catColor(s.category)}"></span>{s.category}<b>{fmtBytes(s.bytes)}</b></div>
