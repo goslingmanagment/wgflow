@@ -1,4 +1,4 @@
-export const ui = $state({ since: '15m' })
+export const ui = $state({ since: '15m', group: 'person' })
 
 export function setSince(s) {
   ui.since = s

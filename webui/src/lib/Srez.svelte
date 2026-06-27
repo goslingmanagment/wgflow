@@ -89,7 +89,8 @@
     if (!snap.logger_ok) out.push('⚠ ЛОГГЕР НЕ ПОДТВЕРЖДЁН — выводы ненадёжны, тишина не доказана.', '')
     out.push(`Срез на ${hhmmMSK(snap.generated_at)} МСК, последние ${windowLabel(win)}.`, '')
     const groups = {}
-    for (const c of snap.clients || []) (groups[personOf(c.name)] ||= []).push(c)
+    // person comes from the server (clients.yaml or its prefix fallback)
+    for (const c of snap.clients || []) (groups[c.person || personOf(c.name)] ||= []).push(c)
     const people = Object.entries(groups)
       .map(([person, devices]) => ({ person, devices, total: devices.reduce((s, d) => s + d.total, 0) }))
       .sort((a, b) => b.total - a.total)
