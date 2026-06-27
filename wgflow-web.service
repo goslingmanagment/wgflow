@@ -1,0 +1,18 @@
+[Unit]
+Description=wgflow web panel
+After=network-online.target wgflow.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Bound to localhost by default — reach it over an SSH tunnel or a reverse proxy.
+# To expose it directly, change the listen address and set WGFLOW_WEB_PASSWORD below.
+ExecStart=/usr/local/bin/wgflow web --listen 127.0.0.1:8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db --wg-config /etc/wireguard/wg0.conf
+# Environment=WGFLOW_WEB_PASSWORD=change-me
+Restart=always
+RestartSec=3
+User=root
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
