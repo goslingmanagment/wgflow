@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -8,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -252,6 +256,48 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 		if got := categorize(tc.target, tc.ip, "tcp", 443); got != tc.want {
 			t.Fatalf("categorize(%q, %q) = %q, want %q", tc.target, tc.ip, got, tc.want)
 		}
+	}
+}
+
+func TestParseTLSSNI(t *testing.T) {
+	record, handshake := testTLSClientHello("upload.example.com")
+	if got := parseTLSSNI(record); got != "upload.example.com" {
+		t.Fatalf("parseTLSSNI = %q, want upload.example.com", got)
+	}
+	if got := parseTLSHandshakeSNI(handshake); got != "upload.example.com" {
+		t.Fatalf("parseTLSHandshakeSNI = %q, want upload.example.com", got)
+	}
+}
+
+func TestParseQUICSNI(t *testing.T) {
+	packet := testQUICInitialPacket(t, "firebaseappcheck.googleapis.com")
+	if got := parseQUICSNI(packet); got != "firebaseappcheck.googleapis.com" {
+		t.Fatalf("parseQUICSNI = %q, want firebaseappcheck.googleapis.com", got)
+	}
+}
+
+func TestParseDNSMessageAnswerNames(t *testing.T) {
+	msg := []byte{0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}
+	msg = appendDNSNameTest(msg, "photos.example.com")
+	msg = append(msg, 0x00, 0x01, 0x00, 0x01) // question A IN
+	msg = append(msg,
+		0xc0, 0x0c, // answer owner -> question name
+		0x00, 0x01, // A
+		0x00, 0x01, // IN
+		0x00, 0x00, 0x01, 0x2c, // TTL 300
+		0x00, 0x04,
+		192, 0, 2, 55,
+	)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok {
+		t.Fatal("parseDNSMessage failed")
+	}
+	if len(parsed.Answers) != 1 {
+		t.Fatalf("answers = %d, want 1", len(parsed.Answers))
+	}
+	ans := parsed.Answers[0]
+	if ans.Name != "photos.example.com" || ans.Type != "A" || ans.Value != "192.0.2.55" || ans.TTL != 300 {
+		t.Fatalf("answer = %+v", ans)
 	}
 }
 
@@ -576,6 +622,102 @@ func TestBasicAuthHandler(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("correct password status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
+}
+
+func testTLSClientHello(host string) (record []byte, handshake []byte) {
+	body := []byte{0x03, 0x03}
+	body = append(body, make([]byte, 32)...)
+	body = append(body, 0x00)                   // session_id
+	body = append(body, 0x00, 0x02, 0x13, 0x01) // cipher_suites
+	body = append(body, 0x01, 0x00)             // compression_methods
+	serverName := []byte{0x00, byte(len(host) >> 8), byte(len(host))}
+	serverName = append(serverName, []byte(host)...)
+	sniData := []byte{byte(len(serverName) >> 8), byte(len(serverName))}
+	sniData = append(sniData, serverName...)
+	ext := []byte{0x00, 0x00, byte(len(sniData) >> 8), byte(len(sniData))}
+	ext = append(ext, sniData...)
+	body = append(body, byte(len(ext)>>8), byte(len(ext)))
+	body = append(body, ext...)
+
+	handshake = []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	handshake = append(handshake, body...)
+	record = []byte{0x16, 0x03, 0x01, byte(len(handshake) >> 8), byte(len(handshake))}
+	record = append(record, handshake...)
+	return record, handshake
+}
+
+func testQUICInitialPacket(t *testing.T, host string) []byte {
+	t.Helper()
+	_, handshake := testTLSClientHello(host)
+	plain := []byte{0x06, 0x00} // CRYPTO, offset=0
+	plain = append(plain, encodeQUICVarIntTest(uint64(len(handshake)))...)
+	plain = append(plain, handshake...)
+	for len(plain) < 160 {
+		plain = append(plain, 0x00)
+	}
+
+	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+	key, iv, hp, ok := quicInitialKeys(0x00000001, dcid)
+	if !ok {
+		t.Fatal("missing quic v1 keys")
+	}
+	header := []byte{0xc0, 0x00, 0x00, 0x00, 0x01, byte(len(dcid))}
+	header = append(header, dcid...)
+	header = append(header, 0x00) // scid len
+	header = append(header, 0x00) // token len
+	pn := []byte{0x01}
+	header = append(header, encodeQUICVarIntTest(uint64(len(pn)+len(plain)+16))...)
+	pnOffset := len(header)
+	headerWithPN := append(append([]byte(nil), header...), pn...)
+
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aead, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nonce := append([]byte(nil), iv...)
+	nonce[len(nonce)-1] ^= 0x01
+	packet := append(headerWithPN, aead.Seal(nil, nonce, plain, headerWithPN)...)
+
+	hpBlock, err := aes.NewCipher(hp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var mask [aes.BlockSize]byte
+	hpBlock.Encrypt(mask[:], packet[pnOffset+4:pnOffset+4+aes.BlockSize])
+	packet[0] ^= mask[0] & 0x0f
+	packet[pnOffset] ^= mask[1]
+	return packet
+}
+
+func encodeQUICVarIntTest(v uint64) []byte {
+	switch {
+	case v < 64:
+		return []byte{byte(v)}
+	case v < 16384:
+		var b [2]byte
+		binary.BigEndian.PutUint16(b[:], uint16(v)|0x4000)
+		return b[:]
+	case v < 1073741824:
+		var b [4]byte
+		binary.BigEndian.PutUint32(b[:], uint32(v)|0x80000000)
+		return b[:]
+	default:
+		var b [8]byte
+		binary.BigEndian.PutUint64(b[:], v|0xc000000000000000)
+		return b[:]
+	}
+}
+
+func appendDNSNameTest(dst []byte, name string) []byte {
+	for _, label := range strings.Split(name, ".") {
+		dst = append(dst, byte(len(label)))
+		dst = append(dst, label...)
+	}
+	return append(dst, 0x00)
 }
 
 func findAgg(t *testing.T, aggs map[string]*TopAgg, client, category, target, proto string, port uint16) *TopAgg {
