@@ -105,9 +105,12 @@ export function dnsRcodeName(code) {
 export const CAT_COLORS = {
   google: '#4493f8',
   meta: '#7f77dd',
-  apple: '#9aa7b4',
+  // apple: silver/slate-blue, distinct from both `other` grey and `google` blue
+  // (was #9aa7b4, a near-twin of `other`).
+  apple: '#9fb8d4',
   telegram: '#1baf7a',
-  yandex: '#eb6834',
+  // yandex: crimson, off the coral brand hue (#e06a3f) it used to collide with.
+  yandex: '#e5263b',
   twitch: '#9146ff',
   cloudflare: '#f38020',
   aws: '#ff9900',
