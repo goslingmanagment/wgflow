@@ -78,6 +78,7 @@ func (s *webServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/throughput", s.handleThroughput)
 	mux.HandleFunc("/api/clients", s.handleClients)
 	mux.HandleFunc("/api/clients/", s.handleClientDetail)
+	mux.HandleFunc("/api/snapshot", s.handleSnapshot)
 	mux.HandleFunc("/api/traffic", s.handleTraffic)
 	mux.HandleFunc("/api/categories", s.handleCategories)
 	mux.HandleFunc("/api/dns", s.handleDNS)
@@ -498,6 +499,202 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 	}
 	sort.Slice(clients, func(i, j int) bool { return clients[i].Total > clients[j].Total })
 	writeJSON(w, map[string]any{"since": d.String(), "logger_ok": loggerOK, "clients": clients})
+}
+
+type apiSnapshotClient struct {
+	Name            string        `json:"name"`
+	DeviceKind      string        `json:"device_kind"`
+	Down            uint64        `json:"down"`
+	Up              uint64        `json:"up"`
+	Total           uint64        `json:"total"`
+	MinutesOver100K int           `json:"minutes_over_100k"`
+	MinutesOver1MB  int           `json:"minutes_over_1mb"`
+	Cats            []apiCatShare `json:"cats"`
+	RecentSites     []string      `json:"recent_sites"`
+	LastTLS         *time.Time    `json:"last_tls,omitempty"`
+	LastDNS         *time.Time    `json:"last_dns,omitempty"`
+	Verdict         apiVerdict    `json:"verdict"`
+}
+
+// handleSnapshot is the fast path behind the Срез drawer: it reads only the
+// compact binary buckets (flow_client_minute_v1 + flow_client_category_minute_v1)
+// and the recent-sites tail scan, deliberately skipping the heavy per-target
+// flow_minute_v1 JSON aggregation so it stays well under the 300ms burst budget.
+// ?clients=a,b ensures an entry (0-byte → silent) for known-but-quiet devices so
+// the Срез can name a silent person, not just whoever happened to have traffic.
+func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
+	d := parseSince(r, 5*time.Minute)
+	now := time.Now()
+	cutoff := now.Add(-d)
+	startMinute := cutoff.Unix() / 60
+	loggerOK := s.loggerHealthy()
+
+	snaps := s.snapshotFromRollup(cutoff, now)
+	sites, lastTLS := s.recentSitesByClient(cutoff, 4)
+	lastDNS := s.lastDNSByClient(cutoff)
+
+	want := map[string]bool{}
+	if cl := r.URL.Query().Get("clients"); cl != "" {
+		for _, n := range strings.Split(cl, ",") {
+			if n = strings.TrimSpace(n); n != "" {
+				want[n] = true
+				if snaps[n] == nil {
+					snaps[n] = &snapClient{cats: map[string]uint64{}}
+				}
+			}
+		}
+	}
+
+	out := make([]apiSnapshotClient, 0, len(snaps))
+	for name, sc := range snaps {
+		if len(want) > 0 && !want[name] {
+			continue
+		}
+		cats := mapToShares(sc.cats)
+		devKind := deviceKind(name)
+		total := sc.down + sc.up
+		v := classify(sc.series, startMinute, total, cats, devKind, lastTLS[name], lastDNS[name], now, loggerOK)
+		entry := apiSnapshotClient{
+			Name: name, DeviceKind: devKind,
+			Down: sc.down, Up: sc.up, Total: total,
+			MinutesOver100K: sc.minOver100k, MinutesOver1MB: sc.minOver1mb,
+			Cats: cats, RecentSites: sites[name], Verdict: v,
+		}
+		if t := lastTLS[name]; !t.IsZero() {
+			entry.LastTLS = &t
+		}
+		if t := lastDNS[name]; !t.IsZero() {
+			entry.LastDNS = &t
+		}
+		out = append(out, entry)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Total > out[j].Total })
+	writeJSON(w, map[string]any{
+		"since":        d.String(),
+		"generated_at": now.Unix(),
+		"logger_ok":    loggerOK,
+		"clients":      out,
+	})
+}
+
+type snapClient struct {
+	series                  []uint64
+	down, up                uint64
+	minOver100k, minOver1mb int
+	cats                    map[string]uint64
+}
+
+// snapshotFromRollup reads per-client minute totals (zero-filled series + down/up
+// + >100KB/>1MB minute counts) and per-client category sums straight from the
+// binary buckets — one bbolt open, no JSON-target scan.
+func (s *webServer) snapshotFromRollup(cutoff, now time.Time) map[string]*snapClient {
+	res := map[string]*snapClient{}
+	startMin := cutoff.Unix() / 60
+	endMin := now.Unix() / 60
+	n := int(endMin - startMin + 1)
+	if n <= 0 {
+		return res
+	}
+	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		return res
+	}
+	defer db.Close()
+	const kb, mb = 1 << 10, 1 << 20
+	_ = db.View(func(tx *bolt.Tx) error {
+		if b := tx.Bucket(rollupClientBucket); b != nil {
+			c := b.Cursor()
+			start := []byte(fmt.Sprintf("%012d", startMin))
+			for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+				parts := strings.SplitN(string(k), "\t", 2)
+				if len(parts) != 2 {
+					continue
+				}
+				m, err := strconv.ParseInt(parts[0], 10, 64)
+				if err != nil || m < startMin {
+					continue
+				}
+				idx := int(m - startMin)
+				if idx < 0 || idx >= n {
+					continue
+				}
+				sc := res[parts[1]]
+				if sc == nil {
+					sc = &snapClient{series: make([]uint64, n), cats: map[string]uint64{}}
+					res[parts[1]] = sc
+				}
+				tot := decodeRollupTotalValue(v)
+				sc.series[idx] += tot.DownloadBytes + tot.UploadBytes
+				sc.down += tot.DownloadBytes
+				sc.up += tot.UploadBytes
+			}
+		}
+		// category sums, seeked per client by prefix so we only touch recent minutes
+		if cb := tx.Bucket(rollupClientCategoryBucket); cb != nil {
+			for name, sc := range res {
+				prefix := []byte(name + "\t")
+				start := []byte(fmt.Sprintf("%s\t%012d", name, startMin))
+				c := cb.Cursor()
+				for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+					p := strings.SplitN(string(k), "\t", 3)
+					if len(p) != 3 {
+						continue
+					}
+					m, err := strconv.ParseInt(p[1], 10, 64)
+					if err != nil || m < startMin {
+						continue
+					}
+					tot := decodeRollupTotalValue(v)
+					sc.cats[p[2]] += tot.DownloadBytes + tot.UploadBytes
+				}
+			}
+		}
+		return nil
+	})
+	for _, sc := range res {
+		for _, b := range sc.series {
+			if b > 100*kb {
+				sc.minOver100k++
+			}
+			if b > mb {
+				sc.minOver1mb++
+			}
+		}
+	}
+	return res
+}
+
+// recentSitesByClient collects up to limit distinct recent SNIs per client
+// (newest first) plus the last TLS time, from one tls.jsonl tail scan.
+func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string][]string, map[string]time.Time) {
+	sites := map[string][]string{}
+	seen := map[string]map[string]bool{}
+	last := map[string]time.Time{}
+	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+		var rec TLSRecord
+		if json.Unmarshal(line, &rec) != nil {
+			return true
+		}
+		if rec.TS.Before(cutoff) {
+			return false
+		}
+		if _, ok := last[rec.Client]; !ok {
+			last[rec.Client] = rec.TS
+		}
+		if rec.ServerName == "" {
+			return true
+		}
+		if seen[rec.Client] == nil {
+			seen[rec.Client] = map[string]bool{}
+		}
+		if seen[rec.Client][rec.ServerName] || len(sites[rec.Client]) >= limit {
+			return true
+		}
+		seen[rec.Client][rec.ServerName] = true
+		sites[rec.Client] = append(sites[rec.Client], rec.ServerName)
+		return true
+	})
+	return sites, last
 }
 
 func (s *webServer) aggregateClients(cutoff time.Time) []*apiClient {

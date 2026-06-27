@@ -187,6 +187,50 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 	}
 }
 
+func TestSnapshotFromRollup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollup.db")
+	rollup, err := OpenRollup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollup.Close()
+
+	base := time.Now().Add(-3 * time.Minute).Truncate(time.Minute)
+	recs := []FlowRecord{
+		// minute 0: 2 MB download from Yandex Music
+		{TSEnd: base, Client: "diana-iphone", RemoteIP: "87.250.250.242", RemotePort: 443, Proto: "tcp", Domain: "api.music.yandex.net", ClientDownloadBytes: 2 << 20},
+		// minute 2: 300 KB down + 20 KB up to Instagram
+		{TSEnd: base.Add(2 * time.Minute), Client: "diana-iphone", RemoteIP: "157.240.1.1", RemotePort: 443, Proto: "tcp", Domain: "scontent.cdninstagram.com", ClientDownloadBytes: 300 << 10, ClientUploadBytes: 20 << 10},
+	}
+	if err := rollup.Add(recs); err != nil {
+		t.Fatal(err)
+	}
+	srv := &webServer{rollupPath: path}
+	snaps := srv.snapshotFromRollup(base.Add(-time.Minute), base.Add(2*time.Minute))
+	sc := snaps["diana-iphone"]
+	if sc == nil {
+		t.Fatal("missing diana-iphone snapshot")
+	}
+	if want := uint64(2<<20) + uint64(300<<10); sc.down != want {
+		t.Errorf("down = %d, want %d", sc.down, want)
+	}
+	if sc.up != 20<<10 {
+		t.Errorf("up = %d, want %d", sc.up, 20<<10)
+	}
+	if sc.minOver1mb != 1 {
+		t.Errorf("minOver1mb = %d, want 1", sc.minOver1mb)
+	}
+	if sc.minOver100k != 2 {
+		t.Errorf("minOver100k = %d, want 2", sc.minOver100k)
+	}
+	if sc.cats["yandex"] != 2<<20 {
+		t.Errorf("cats[yandex] = %d, want %d", sc.cats["yandex"], 2<<20)
+	}
+	if want := uint64(300<<10) + uint64(20<<10); sc.cats["meta"] != want {
+		t.Errorf("cats[meta] = %d, want %d", sc.cats["meta"], want)
+	}
+}
+
 func TestDeviceKind(t *testing.T) {
 	cases := map[string]string{
 		"diana-iphone": "phone",
