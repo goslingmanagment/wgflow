@@ -25,12 +25,13 @@ import (
 )
 
 type Config struct {
-	Iface         string
-	WGConfigPath  string
-	LogDir        string
-	RollupPath    string
-	FlushInterval time.Duration
-	VPNCIDRs      []string
+	Iface           string
+	WGConfigPath    string
+	LogDir          string
+	RollupPath      string
+	FlushInterval   time.Duration
+	RollupRetention time.Duration
+	VPNCIDRs        []string
 }
 
 type RuntimeStats struct {
@@ -247,6 +248,10 @@ func main() {
 		if err := rollupImport(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+	case "rollup-prune":
+		if err := rollupPrune(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	case "stats":
 		if err := statsCmd(os.Args[2:]); err != nil {
 			log.Fatal(err)
@@ -269,6 +274,7 @@ Usage:
   wgflow top --since 5m [--client maxim] [--log-dir /var/log/wgflow] [--limit 30]
   wgflow report --since 24h [--log-dir /var/log/wgflow]
   wgflow rollup-import --since 24h [--reset]
+  wgflow rollup-prune --keep 30d [--rollup /var/lib/wgflow/rollup.db]
   wgflow stats [--log-dir /var/log/wgflow] [--json]
   wgflow web [--listen :8080] [--log-dir /var/log/wgflow] [--rollup /var/lib/wgflow/rollup.db]
 
@@ -283,6 +289,7 @@ func serve(args []string) error {
 	fs.StringVar(&cfg.LogDir, "log-dir", "/var/log/wgflow", "log directory")
 	fs.StringVar(&cfg.RollupPath, "rollup", "/var/lib/wgflow/rollup.db", "rollup DB path")
 	fs.DurationVar(&cfg.FlushInterval, "flush", 30*time.Second, "flow flush interval")
+	retentionStr := fs.String("rollup-retention", "0", "delete rollup minute buckets older than this, e.g. 90d (0 = keep forever)")
 	var cidrList multiFlag
 	cidrList = append(cidrList, "10.66.66.0/24", "fd42:42:42::/64")
 	fs.Var(&cidrList, "vpn-cidr", "VPN client CIDR; can be repeated")
@@ -290,6 +297,11 @@ func serve(args []string) error {
 		return err
 	}
 	cfg.VPNCIDRs = cidrList
+	retention, err := parseRetention(*retentionStr)
+	if err != nil {
+		return fmt.Errorf("--rollup-retention: %w", err)
+	}
+	cfg.RollupRetention = retention
 
 	if err := os.MkdirAll(cfg.LogDir, 0755); err != nil {
 		return err
@@ -347,7 +359,21 @@ func serve(args []string) error {
 	defer reloadTicker.Stop()
 	statsTicker := time.NewTicker(30 * time.Second)
 	defer statsTicker.Stop()
+	pruneTicker := time.NewTicker(24 * time.Hour)
+	defer pruneTicker.Stop()
 	var pendingRollup []FlowRecord
+
+	runPrune := func() {
+		if cfg.RollupRetention <= 0 {
+			return
+		}
+		if n, err := pruneRollup(cfg.RollupPath, time.Now().Add(-cfg.RollupRetention)); err != nil {
+			log.Printf("rollup prune failed: %v", err)
+		} else if n > 0 {
+			log.Printf("rollup prune: deleted %d keys older than %s", n, cfg.RollupRetention)
+		}
+	}
+	runPrune()
 
 	log.Printf("wgflow capture started iface=%s log_dir=%s rollup=%s flush=%s clients=%d", cfg.Iface, cfg.LogDir, cfg.RollupPath, cfg.FlushInterval, clients.Count())
 
@@ -513,6 +539,8 @@ func serve(args []string) error {
 			stats.currentFlowKeys.Store(uint64(len(flows)))
 			flowMu.Unlock()
 			_ = stats.Write()
+		case <-pruneTicker.C:
+			runPrune()
 		}
 	}
 }
@@ -696,6 +724,120 @@ func rollupImport(args []string) error {
 	}
 	fmt.Printf("imported_records=%d rollup=%s window=%s\n", count, *rollupPath, d)
 	return nil
+}
+
+// parseRetention accepts Go durations plus "d" (days) and "w" (weeks), so the
+// retention flags can read naturally as "30d" / "12w".
+func parseRetention(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	for suffix, unit := range map[string]time.Duration{"d": 24 * time.Hour, "w": 7 * 24 * time.Hour} {
+		if strings.HasSuffix(s, suffix) {
+			n, err := strconv.ParseFloat(strings.TrimSuffix(s, suffix), 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid duration %q: %w", s, err)
+			}
+			return time.Duration(n * float64(unit)), nil
+		}
+	}
+	return time.ParseDuration(s)
+}
+
+func rollupPrune(args []string) error {
+	fs := flag.NewFlagSet("rollup-prune", flag.ExitOnError)
+	rollupPath := fs.String("rollup", "/var/lib/wgflow/rollup.db", "rollup DB path")
+	keepStr := fs.String("keep", "30d", "retention window (e.g. 30d, 12w, 720h); minute buckets older than this are deleted")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	keep, err := parseRetention(*keepStr)
+	if err != nil {
+		return err
+	}
+	if keep <= 0 {
+		return fmt.Errorf("--keep must be positive")
+	}
+	cutoff := time.Now().Add(-keep)
+	n, err := pruneRollup(*rollupPath, cutoff)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("pruned_keys=%d rollup=%s keep=%s cutoff=%s\n", n, *rollupPath, keep, cutoff.Format(time.RFC3339))
+	return nil
+}
+
+// pruneRollup deletes every minute bucket older than cutoff across all four
+// rollup buckets. The three minute-prefixed buckets are key-sorted by minute so
+// we stop at the cutoff; the client-category bucket (client\tminute\tcat) is not,
+// so it is full-scanned. bbolt reuses the freed pages, so the file stops growing
+// (it does not shrink on disk without a separate compaction).
+func pruneRollup(path string, cutoff time.Time) (int, error) {
+	cutoffMinute := cutoff.Unix() / 60
+	db, err := bolt.Open(path, 0644, &bolt.Options{Timeout: 30 * time.Second})
+	if err != nil {
+		return 0, err
+	}
+	defer db.Close()
+	deleted := 0
+	err = db.Update(func(tx *bolt.Tx) error {
+		for _, name := range [][]byte{rollupBucket, rollupClientBucket, rollupCategoryBucket} {
+			b := tx.Bucket(name)
+			if b == nil {
+				continue
+			}
+			var del [][]byte
+			c := b.Cursor()
+			for k, _ := c.First(); k != nil; k, _ = c.Next() {
+				m := minutePrefix(k)
+				if m < 0 {
+					continue
+				}
+				if m >= cutoffMinute {
+					break // keys are sorted by minute
+				}
+				del = append(del, append([]byte(nil), k...))
+			}
+			for _, k := range del {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				deleted++
+			}
+		}
+		if b := tx.Bucket(rollupClientCategoryBucket); b != nil {
+			var del [][]byte
+			c := b.Cursor()
+			for k, _ := c.First(); k != nil; k, _ = c.Next() {
+				parts := strings.SplitN(string(k), "\t", 3)
+				if len(parts) != 3 {
+					continue
+				}
+				if m, err := strconv.ParseInt(parts[1], 10, 64); err == nil && m < cutoffMinute {
+					del = append(del, append([]byte(nil), k...))
+				}
+			}
+			for _, k := range del {
+				if err := b.Delete(k); err != nil {
+					return err
+				}
+				deleted++
+			}
+		}
+		return nil
+	})
+	return deleted, err
+}
+
+// minutePrefix parses the leading zero-padded minute from a rollup key, or -1.
+func minutePrefix(k []byte) int64 {
+	s := string(k)
+	if i := strings.IndexByte(s, '\t'); i >= 0 {
+		s = s[:i]
+	}
+	m, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return -1
+	}
+	return m
 }
 
 func statsCmd(args []string) error {

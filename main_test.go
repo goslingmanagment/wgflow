@@ -349,6 +349,48 @@ func TestParseRange(t *testing.T) {
 	}
 }
 
+func TestPruneRollup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollup.db")
+	rollup, err := OpenRollup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollup.Close()
+
+	old := time.Now().Add(-40 * 24 * time.Hour).Truncate(time.Minute)
+	recent := time.Now().Add(-1 * time.Hour).Truncate(time.Minute)
+	recs := []FlowRecord{
+		{TSEnd: old, Client: "alice", RemoteIP: "87.250.250.242", RemotePort: 443, Proto: "tcp", Domain: "api.music.yandex.net", ClientDownloadBytes: 1000},
+		{TSEnd: recent, Client: "alice", RemoteIP: "87.250.250.242", RemotePort: 443, Proto: "tcp", Domain: "api.music.yandex.net", ClientDownloadBytes: 2000},
+	}
+	if err := rollup.Add(recs); err != nil {
+		t.Fatal(err)
+	}
+
+	// One old minute populates one key in each of the 4 buckets -> prune deletes 4.
+	n, err := pruneRollup(path, time.Now().Add(-30*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 4 {
+		t.Fatalf("pruned %d keys, want 4 (one old minute across all 4 buckets)", n)
+	}
+
+	// The recent flow must survive intact.
+	byClient, _, _, err := aggregateReportTotalsFromRollup(path, time.Now().Add(-90*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if byClient["alice"].Down != 2000 {
+		t.Fatalf("download after prune = %d, want 2000 (old gone, recent kept)", byClient["alice"].Down)
+	}
+
+	// Idempotent: nothing left older than the cutoff.
+	if n2, err := pruneRollup(path, time.Now().Add(-30*24*time.Hour)); err != nil || n2 != 0 {
+		t.Fatalf("second prune = %d (err %v), want 0", n2, err)
+	}
+}
+
 func TestDeviceKind(t *testing.T) {
 	cases := map[string]string{
 		"diana-iphone": "phone",
