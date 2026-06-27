@@ -1,7 +1,62 @@
-export const ui = $state({ since: '15m', group: 'person' })
+import { WINDOWS } from './format.js'
+
+const UI_PREFS_KEY = 'wgflow.ui'
+const DEFAULT_UI = Object.freeze({ since: '15m', group: 'person' })
+const VALID_WINDOWS = new Set(WINDOWS.map((w) => w.value))
+const VALID_GROUPS = new Set(['person', 'device'])
+
+function validSince(s) {
+  return VALID_WINDOWS.has(s) ? s : DEFAULT_UI.since
+}
+
+function validGroup(g) {
+  return VALID_GROUPS.has(g) ? g : DEFAULT_UI.group
+}
+
+function storage() {
+  try {
+    return typeof localStorage === 'undefined' ? null : localStorage
+  } catch {
+    return null
+  }
+}
+
+function readPrefs() {
+  const st = storage()
+  if (!st) return { ...DEFAULT_UI }
+  try {
+    const raw = JSON.parse(st.getItem(UI_PREFS_KEY) || '{}')
+    return {
+      since: validSince(raw.since),
+      group: validGroup(raw.group),
+    }
+  } catch {
+    return { ...DEFAULT_UI }
+  }
+}
+
+function writePrefs() {
+  const st = storage()
+  if (!st) return
+  try {
+    st.setItem(UI_PREFS_KEY, JSON.stringify({ since: ui.since, group: ui.group }))
+  } catch {}
+}
+
+export const ui = $state(readPrefs())
 
 export function setSince(s) {
-  ui.since = s
+  const next = validSince(s)
+  if (ui.since === next) return
+  ui.since = next
+  writePrefs()
+}
+
+export function setGroup(g) {
+  const next = validGroup(g)
+  if (ui.group === next) return
+  ui.group = next
+  writePrefs()
 }
 
 // --- Logger health verdict -------------------------------------------------

@@ -1,5 +1,5 @@
 <script>
-  import { ui } from '../lib/store.svelte.js'
+  import { setGroup, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, verdictColor, deviceGlyph } from '../lib/format.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
@@ -99,8 +99,8 @@
 {:else}
   <div class="cnt">
     <span class="grp">group
-      <button class:on={ui.group === 'person'} onclick={() => (ui.group = 'person')}>person</button>
-      <button class:on={ui.group === 'device'} onclick={() => (ui.group = 'device')}>device</button>
+      <button class:on={ui.group === 'person'} onclick={() => setGroup('person')}>person</button>
+      <button class:on={ui.group === 'device'} onclick={() => setGroup('device')}>device</button>
     </span>
     {#if ui.group === 'person'}· {grouped.length} people · {rows.length} devices{:else}· {rows.length} seen{/if} · last {ui.since} · classification inferred
   </div>
