@@ -1,10 +1,11 @@
 <script>
   import { ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph } from '../lib/format.js'
+  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix } from '../lib/format.js'
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
   import VerdictBadge from '../lib/VerdictBadge.svelte'
+  import Ribbon from '../lib/Ribbon.svelte'
 
   // "last real-use trace" (last >100KB minute), falling back to last-any (last
   // ping). Never "проснулась" — only a trace, always MSK.
@@ -20,22 +21,45 @@
   let { param } = $props()
   let data = $state(null)
   let err = $state(null)
+  let fromAnchor = $state(null) // unix seconds, or null = relative window
+  let anchorInput = $state('')
 
+  // Reset any anchor when switching clients (declared first so it runs before the
+  // loader, which would otherwise fire once with the previous client's anchor).
+  $effect(() => {
+    param
+    fromAnchor = null
+    anchorInput = ''
+  })
   $effect(() => {
     const n = param
     const s = ui.since
-    load(n, s)
+    const f = fromAnchor
+    load(n, s, f)
   })
-  async function load(n, s) {
+  async function load(n, s, f) {
     try {
-      data = await getJSON('/api/clients/' + encodeURIComponent(n) + '?since=' + s)
+      const u = new URLSearchParams()
+      if (f) u.set('from', f)
+      else u.set('since', s)
+      data = await getJSON('/api/clients/' + encodeURIComponent(n) + '?' + u.toString())
       err = null
     } catch (e) {
       err = e.message
     }
   }
+  function applyAnchor() {
+    const u = mskAnchorUnix(anchorInput)
+    if (u) fromAnchor = u
+  }
+  function clearAnchor() {
+    fromAnchor = null
+    anchorInput = ''
+  }
 
-  const secs = $derived(sinceSeconds(ui.since))
+  // window length in seconds: absolute span when anchored, else the relative since
+  const secs = $derived(data?.from && data?.to ? data.to - data.from : sinceSeconds(ui.since))
+  const windowLabel = $derived(fromAnchor && data?.from ? 'после ' + hhmmMSK(data.from) + ' МСК' : 'last ' + ui.since)
   const seriesPoints = $derived.by(() => {
     const arr = data?.series || []
     const start = data?.series_start_minute
@@ -61,8 +85,16 @@
     <div class="trace">{#if deviceGlyph(data.device_kind)}<span class="dev" title={data.device_kind}>{deviceGlyph(data.device_kind)}</span> {/if}{traceLine(data.verdict)}</div>
   {/if}
 
+  <div class="anchor">
+    <span class="lbl">окно:</span>
+    <input class="mono" placeholder="после HH:MM" bind:value={anchorInput} onkeydown={(e) => e.key === 'Enter' && applyAnchor()} />
+    <button onclick={applyAnchor}>показать</button>
+    {#if fromAnchor}<button class="clr" onclick={clearAnchor}>↺ относительное ({ui.since})</button>{/if}
+    <span class="now">{windowLabel}</span>
+  </div>
+
   <div class="kpis">
-    <div class="kpi"><div class="k">Rate · last {ui.since}</div><div class="v mono">{fmtRate(data.total, secs)} <small>Mbit/s</small></div></div>
+    <div class="kpi"><div class="k">Rate · {windowLabel}</div><div class="v mono">{fmtRate(data.total, secs)} <small>Mbit/s</small></div></div>
     <div class="kpi"><div class="k">Download</div><div class="v mono">{fmtBytes(data.down)}</div></div>
     <div class="kpi"><div class="k">Upload</div><div class="v mono">{fmtBytes(data.up)}</div></div>
     <div class="kpi"><div class="k">Top category</div><div class="v"><span class="cd" style="background:{catColor(data.categories[0]?.category)}"></span>{data.categories[0]?.category || '—'}</div></div>
@@ -71,9 +103,13 @@
 
   {#if seriesPoints.length > 1}
     <div class="card">
-      <div class="ch"><h3 class="serif">Throughput</h3><span class="hint">last {ui.since} · Mbit/s</span></div>
+      <div class="ch"><h3 class="serif">Throughput</h3><span class="hint">{windowLabel} · Mbit/s</span></div>
       <Chart points={seriesPoints} color="#e06a3f" unit="Mbit/s" height={130} />
     </div>
+  {/if}
+
+  {#if data.minutes?.length}
+    <Ribbon minutes={data.minutes} name={data.name} />
   {/if}
 
   <div class="card">
@@ -135,7 +171,47 @@
   .trace {
     color: var(--color-muted);
     font-size: 12.5px;
-    margin-bottom: 16px;
+    margin-bottom: 12px;
+  }
+  .anchor {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 14px;
+  }
+  .anchor .lbl {
+    color: var(--color-muted);
+    font-size: 12px;
+  }
+  .anchor input {
+    background: var(--color-s1);
+    border: 1px solid var(--color-border);
+    border-radius: 7px;
+    padding: 6px 10px;
+    color: var(--color-text);
+    width: 120px;
+    font-size: 12px;
+  }
+  .anchor button {
+    background: var(--color-coral-dim);
+    color: var(--color-coral);
+    border: 0;
+    border-radius: 7px;
+    padding: 6px 12px;
+    cursor: pointer;
+    font-size: 12px;
+  }
+  .anchor .clr {
+    background: transparent;
+    border: 1px solid var(--color-border);
+    color: var(--color-dim);
+  }
+  .anchor .now {
+    color: var(--color-muted);
+    font-size: 12px;
+    margin-left: auto;
+    font-family: var(--font-mono);
   }
   h1 {
     font-size: 24px;

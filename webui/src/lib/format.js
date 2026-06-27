@@ -85,6 +85,20 @@ export function hourMSK(d = new Date()) {
   return Number(_mskHour.format(d)) % 24
 }
 
+// "HH:MM" (MSK) -> unix seconds for today in Moscow; if that instant is still in
+// the future (e.g. asked 23:00 just after midnight), roll back a day. Powers the
+// "после 02:05" anchor. Moscow is +03:00 year-round.
+export function mskAnchorUnix(hhmm) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec((hhmm || '').trim())
+  if (!m) return null
+  const ymd = new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Moscow', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date())
+  const ms = Date.parse(`${ymd}T${m[1].padStart(2, '0')}:${m[2]}:00+03:00`)
+  if (isNaN(ms)) return null
+  let unix = Math.floor(ms / 1000)
+  if (unix > Date.now() / 1000) unix -= 86400
+  return unix
+}
+
 export function dnsRcodeName(code) {
   const names = {
     0: 'NOERROR',
