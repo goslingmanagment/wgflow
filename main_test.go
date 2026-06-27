@@ -187,6 +187,107 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 	}
 }
 
+func TestDeviceKind(t *testing.T) {
+	cases := map[string]string{
+		"diana-iphone": "phone",
+		"anya-ipad":    "phone",
+		"kid-android":  "phone",
+		"mom-macbook":  "laptop",
+		"dad-pc":       "laptop",
+		"office-imac":  "laptop",
+		"work-desktop": "laptop",
+		"mom":          "",
+		"guest":        "",
+	}
+	for name, want := range cases {
+		if got := deviceKind(name); got != want {
+			t.Errorf("deviceKind(%q) = %q, want %q", name, got, want)
+		}
+	}
+}
+
+func TestIsBackgroundOnly(t *testing.T) {
+	cases := []struct {
+		cats []apiCatShare
+		want bool
+	}{
+		{[]apiCatShare{{Category: "apple", Bytes: 100}, {Category: "dns", Bytes: 50}}, true},
+		{[]apiCatShare{{Category: "apple", Bytes: 100}, {Category: "meta", Bytes: 50}}, false},
+		{[]apiCatShare{{Category: "yandex", Bytes: 100}}, false},
+		{[]apiCatShare{{Category: "apple", Bytes: 0}}, false}, // no non-zero cats -> not background, it's empty
+		{nil, false},
+	}
+	for i, tc := range cases {
+		if got := isBackgroundOnly(tc.cats); got != tc.want {
+			t.Errorf("case %d: isBackgroundOnly = %v, want %v", i, got, tc.want)
+		}
+	}
+}
+
+func TestClassifyRules(t *testing.T) {
+	const KB, MB = 1 << 10, 1 << 20
+	now := time.Now()
+	start := now.Add(-15*time.Minute).Unix() / 60
+	fresh := now.Add(-1 * time.Minute)
+	var zero time.Time
+	cat := func(c string, b uint64) []apiCatShare { return []apiCatShare{{Category: c, Bytes: b}} }
+
+	cases := []struct {
+		name           string
+		series         []uint64
+		total          uint64
+		cats           []apiCatShare
+		devKind        string
+		lastTLS        time.Time
+		loggerOK       bool
+		wantStatus     string
+		wantConfidence string
+	}{
+		{"silent confirmed", []uint64{0, 0, 0}, 0, nil, "phone", zero, true, "silent", "high"},
+		{"silent unconfirmed (logger down)", []uint64{0, 0, 0}, 0, nil, "phone", zero, false, "silent", "low"},
+		{"sustained stream on phone", []uint64{2 * MB, 2 * MB, 3 * MB}, 7 * MB, cat("yandex", 7*MB), "phone", fresh, true, "active", "high"},
+		{"sustained stream on laptop is softer", []uint64{2 * MB, 2 * MB}, 4 * MB, cat("yandex", 4*MB), "laptop", zero, true, "active", "medium"},
+		{"tens of MB in one burst", []uint64{25 * MB}, 25 * MB, cat("google", 25*MB), "phone", zero, true, "active", "high"},
+		{"fresh TLS to non-background", []uint64{200 * KB}, 200 * KB, cat("meta", 200*KB), "phone", fresh, true, "active", "medium"},
+		{"apple-only small is background", []uint64{30 * KB, 25 * KB}, 55 * KB, cat("apple", 55*KB), "laptop", zero, true, "likely-background", "high"},
+		{"small non-background, no fresh trace", []uint64{150 * KB}, 150 * KB, cat("meta", 150*KB), "phone", zero, true, "likely-background", "low"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			v := classify(tc.series, start, tc.total, tc.cats, tc.devKind, tc.lastTLS, zero, now, tc.loggerOK)
+			if v.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q (reasons: %v)", v.Status, tc.wantStatus, v.Reasons)
+			}
+			if v.Confidence != tc.wantConfidence {
+				t.Errorf("confidence = %q, want %q (reasons: %v)", v.Confidence, tc.wantConfidence, v.Reasons)
+			}
+			if len(v.Reasons) == 0 {
+				t.Errorf("verdict has no reasons — every classification must explain its firing rule")
+			}
+		})
+	}
+}
+
+func TestClassifyTracksLastSignificant(t *testing.T) {
+	const KB, MB = 1 << 10, 1 << 20
+	now := time.Now()
+	start := now.Add(-5*time.Minute).Unix() / 60
+	// minutes: [push, big, push, quiet, quiet] -> last >100KB is index 1
+	series := []uint64{20 * KB, 2 * MB, 20 * KB, 0, 0}
+	v := classify(series, start, 2*MB+40*KB, []apiCatShare{{Category: "yandex", Bytes: 2 * MB}}, "phone", time.Time{}, time.Time{}, now, true)
+	if v.LastSignificantAt == nil {
+		t.Fatal("expected a last_significant_at")
+	}
+	wantSig := time.Unix((start+1)*60, 0)
+	if !v.LastSignificantAt.Equal(wantSig) {
+		t.Errorf("last_significant_at = %v, want %v", v.LastSignificantAt, wantSig)
+	}
+	// last_any_at must be the later push (index 2), separating "last online" from "last real use"
+	if v.Evidence.LastAnyAt == nil || !v.Evidence.LastAnyAt.Equal(time.Unix((start+2)*60, 0)) {
+		t.Errorf("last_any_at = %v, want %v", v.Evidence.LastAnyAt, time.Unix((start+2)*60, 0))
+	}
+}
+
 func TestBasicAuthHandler(t *testing.T) {
 	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
