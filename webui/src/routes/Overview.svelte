@@ -1,5 +1,5 @@
 <script>
-  import { ui } from '../lib/store.svelte.js'
+  import { refresh, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtShort, catColor } from '../lib/format.js'
   import Chart from '../lib/Chart.svelte'
   import Mix from '../lib/Mix.svelte'
@@ -12,6 +12,7 @@
 
   $effect(() => {
     const s = ui.since
+    const tick = refresh.tick
     load(s)
   })
   async function load(s) {

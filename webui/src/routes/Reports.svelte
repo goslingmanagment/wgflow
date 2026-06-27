@@ -1,4 +1,5 @@
 <script>
+  import { refresh } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes } from '../lib/format.js'
   import Icon from '../lib/Icon.svelte'
 
@@ -15,6 +16,7 @@
 
   $effect(() => {
     const s = since
+    const tick = refresh.tick
     load(s)
   })
   async function load(s) {

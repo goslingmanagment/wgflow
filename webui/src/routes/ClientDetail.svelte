@@ -1,5 +1,5 @@
 <script>
-  import { ui } from '../lib/store.svelte.js'
+  import { refresh, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix } from '../lib/format.js'
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
@@ -35,6 +35,7 @@
     const n = param
     const s = ui.since
     const f = fromAnchor
+    const tick = refresh.tick
     load(n, s, f)
   })
   async function load(n, s, f) {
@@ -108,15 +109,6 @@
     </div>
   {/if}
 
-  {#if data.minutes?.length}
-    <Ribbon minutes={data.minutes} name={data.name} />
-  {/if}
-
-  <div class="card">
-    <div class="ch"><h3 class="serif">Across the day</h3><span class="hint">24h · by category</span></div>
-    <DayTimeline day={data.day} />
-  </div>
-
   <div class="two">
     <div class="card">
       <div class="ch"><h3 class="serif">Top targets</h3><span class="hint mono" title="Wire bytes are ~94–95% of these totals; packet counts are approximate (GSO/GRO coalescing).">~94–95% (GSO/GRO)</span></div>
@@ -148,6 +140,15 @@
       {#if data.recent_dns.length === 0}<div class="empty">No DNS queries recently — likely cached or encrypted (DoH/DoT).</div>{/if}
     </div>
   </div>
+
+  <div class="card">
+    <div class="ch"><h3 class="serif">Across the day</h3><span class="hint">24h · by category</span></div>
+    <DayTimeline day={data.day} />
+  </div>
+
+  {#if data.minutes?.length}
+    <Ribbon minutes={data.minutes} name={data.name} />
+  {/if}
 {/if}
 
 <style>

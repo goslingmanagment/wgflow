@@ -1,7 +1,7 @@
 import { WINDOWS } from './format.js'
 
 const UI_PREFS_KEY = 'wgflow.ui'
-const DEFAULT_UI = Object.freeze({ since: '15m', group: 'person' })
+const DEFAULT_UI = Object.freeze({ since: '15m', group: 'device', autoRefresh: true })
 const VALID_WINDOWS = new Set(WINDOWS.map((w) => w.value))
 const VALID_GROUPS = new Set(['person', 'device'])
 
@@ -29,6 +29,7 @@ function readPrefs() {
     return {
       since: validSince(raw.since),
       group: validGroup(raw.group),
+      autoRefresh: raw.autoRefresh === false ? false : DEFAULT_UI.autoRefresh,
     }
   } catch {
     return { ...DEFAULT_UI }
@@ -39,11 +40,12 @@ function writePrefs() {
   const st = storage()
   if (!st) return
   try {
-    st.setItem(UI_PREFS_KEY, JSON.stringify({ since: ui.since, group: ui.group }))
+    st.setItem(UI_PREFS_KEY, JSON.stringify({ since: ui.since, group: ui.group, autoRefresh: ui.autoRefresh }))
   } catch {}
 }
 
 export const ui = $state(readPrefs())
+export const refresh = $state({ tick: 0, intervalMs: 5_000, lastAt: Date.now() })
 
 export function setSince(s) {
   const next = validSince(s)
@@ -57,6 +59,25 @@ export function setGroup(g) {
   if (ui.group === next) return
   ui.group = next
   writePrefs()
+}
+
+export function setAutoRefresh(enabled) {
+  const next = Boolean(enabled)
+  if (ui.autoRefresh === next) return
+  ui.autoRefresh = next
+  if (next) requestRefresh()
+  writePrefs()
+}
+
+export function requestRefresh(now = Date.now()) {
+  refresh.lastAt = now
+  refresh.tick += 1
+}
+
+export function maybeAutoRefresh(visible = true, now = Date.now()) {
+  if (!visible || !ui.autoRefresh) return
+  if (now - refresh.lastAt < refresh.intervalMs) return
+  requestRefresh(now)
 }
 
 // --- Logger health verdict -------------------------------------------------

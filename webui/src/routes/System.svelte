@@ -1,10 +1,12 @@
 <script>
+  import { refresh } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtShort, uptime, ago } from '../lib/format.js'
   import HealthPill from '../lib/HealthPill.svelte'
 
   let data = $state(null)
   let err = $state(null)
   $effect(() => {
+    const tick = refresh.tick
     load()
   })
   async function load() {

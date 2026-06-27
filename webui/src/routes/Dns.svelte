@@ -1,5 +1,5 @@
 <script>
-  import { ui } from '../lib/store.svelte.js'
+  import { refresh, ui } from '../lib/store.svelte.js'
   import { dnsRcodeName, getJSON, hhmmssMSK } from '../lib/format.js'
   import Win from '../lib/Win.svelte'
 
@@ -11,6 +11,7 @@
 
   $effect(() => {
     const s = ui.since,
+      tick = refresh.tick,
       t = qtype,
       e = errorsOnly,
       qq = q

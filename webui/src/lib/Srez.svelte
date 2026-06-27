@@ -1,5 +1,6 @@
 <script>
   import { getJSON, fmtBytes, hhmmMSK } from './format.js'
+  import { refresh } from './store.svelte.js'
 
   // The Срез drawer. It assembles ONE plain-text verdict block, renders that
   // exact string, and copies that exact string — so the screen and the clipboard
@@ -21,6 +22,7 @@
     '«проснулась» недоказуемо — только первый заметный след. Байты ~94–95% (GSO/GRO).'
 
   $effect(() => {
+    const tick = refresh.tick
     if (open) load(win, names.join(','))
   })
 

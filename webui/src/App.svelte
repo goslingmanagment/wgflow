@@ -1,9 +1,10 @@
 <script>
   import { onMount } from 'svelte'
   import { hhmmssMSK } from './lib/format.js'
-  import { onStats, onStreamError, refreshHealth } from './lib/store.svelte.js'
+  import { maybeAutoRefresh, onStats, onStreamError, refreshHealth, requestRefresh, ui } from './lib/store.svelte.js'
   import Icon from './lib/Icon.svelte'
   import Win from './lib/Win.svelte'
+  import AutoRefresh from './lib/AutoRefresh.svelte'
   import HealthPill from './lib/HealthPill.svelte'
   import Clients from './routes/Clients.svelte'
   import ClientDetail from './routes/ClientDetail.svelte'
@@ -41,11 +42,16 @@
   onMount(() => {
     const onHash = () => (route = parse())
     addEventListener('hashchange', onHash)
+    const onVisible = () => {
+      if (document.visibilityState === 'visible' && ui.autoRefresh) requestRefresh()
+    }
+    document.addEventListener('visibilitychange', onVisible)
     // 1s heartbeat: advances the wall-clock AND re-derives logger health, so a
     // dead stream/logger decays to stale/down on its own (the old pill never did).
     const clock = setInterval(() => {
       now = new Date()
       refreshHealth()
+      maybeAutoRefresh(document.visibilityState === 'visible')
     }, 1000)
     let es
     try {
@@ -63,6 +69,7 @@
     }
     return () => {
       removeEventListener('hashchange', onHash)
+      document.removeEventListener('visibilitychange', onVisible)
       clearInterval(clock)
       es && es.close()
     }
@@ -83,6 +90,7 @@
       <div class="right">
         <span class="clock mono" title="Текущее время МСК">{hhmmssMSK(now)}<small>МСК</small></span>
         <Win />
+        <AutoRefresh />
         <HealthPill rate />
       </div>
     </header>

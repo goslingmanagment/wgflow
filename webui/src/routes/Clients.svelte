@@ -1,5 +1,5 @@
 <script>
-  import { setGroup, ui } from '../lib/store.svelte.js'
+  import { refresh, setGroup, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, verdictColor, deviceGlyph } from '../lib/format.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
@@ -16,6 +16,7 @@
 
   $effect(() => {
     const s = ui.since
+    const tick = refresh.tick
     load(s)
   })
   async function load(s) {

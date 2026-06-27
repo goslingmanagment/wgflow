@@ -1,5 +1,5 @@
 <script>
-  import { ui } from '../lib/store.svelte.js'
+  import { refresh, ui } from '../lib/store.svelte.js'
   import { getJSON, catColor, ago } from '../lib/format.js'
   import Win from '../lib/Win.svelte'
 
@@ -9,6 +9,7 @@
 
   $effect(() => {
     const s = ui.since,
+      tick = refresh.tick,
       qq = q
     load(s, qq)
   })
