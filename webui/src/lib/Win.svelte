@@ -42,4 +42,14 @@
     background: var(--color-coral-dim);
     color: var(--color-coral);
   }
+  @media (max-width: 640px) {
+    .seg {
+      width: 100%;
+      justify-content: flex-start;
+    }
+    .seg button {
+      padding: 7px 13px;
+      font-size: 13px;
+    }
+  }
 </style>

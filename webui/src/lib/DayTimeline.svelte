@@ -156,6 +156,7 @@
     padding: 9px 11px;
     z-index: 5;
     pointer-events: none;
+    -webkit-backdrop-filter: blur(3px);
     backdrop-filter: blur(3px);
   }
   .tip.left {

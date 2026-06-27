@@ -37,7 +37,7 @@
   const maxHits = $derived(Math.max(1, ...sites.map((s) => s.hits)))
 </script>
 
-<div class="head"><h1 class="serif">Sites <small>TLS SNI</small></h1><Win /></div>
+<div class="head"><h1 class="serif">Sites <small>TLS SNI</small></h1><span class="pgwin"><Win /></span></div>
 <div class="filters"><input placeholder="search site" bind:value={q} /><span class="cnt">last {ui.since} · {sites.length} sites</span></div>
 
 {#if err}<p class="err">Couldn't load sites. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
@@ -93,4 +93,22 @@
   .dim { color: var(--color-muted); }
   .err { color: var(--color-danger); }
   .pad { padding: 16px; }
+  @media (max-width: 640px) {
+    .pgwin { display: none; } /* the sticky header already carries the window picker */
+    .site {
+      grid-template-columns: 1fr auto;
+      grid-template-areas:
+        'dm dm'
+        'hits last'
+        'cl cl';
+      gap: 7px 12px;
+      padding: 12px 0;
+    }
+    .dm { grid-area: dm; }
+    .hits { grid-area: hits; }
+    .cl { grid-area: cl; }
+    .last { grid-area: last; text-align: right; }
+    input { flex: 1 1 160px; width: auto; }
+    .rec .a { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  }
 </style>

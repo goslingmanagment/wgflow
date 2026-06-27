@@ -29,7 +29,7 @@
   const total = $derived(list.reduce((s, c) => s + c.total, 0) || 1)
 </script>
 
-<div class="head"><h1 class="serif">Categories</h1><Win /></div>
+<div class="head"><h1 class="serif">Categories</h1><span class="pgwin"><Win /></span></div>
 
 {#if err}<p class="err">Couldn't load categories. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
   <div class="card hero">
@@ -76,4 +76,20 @@
   .sub b { color: var(--color-text); font-weight: 400; }
   .err { color: var(--color-danger); }
   .dim { color: var(--color-muted); }
+  @media (max-width: 640px) {
+    .pgwin { display: none; } /* the sticky header already carries the window picker */
+    .hero { gap: 16px; padding: 14px; }
+    .sum .big { font-size: 26px; }
+    .top {
+      grid-template-columns: 1fr auto;
+      grid-template-areas:
+        'nm tot'
+        'bar pc';
+      gap: 6px 12px;
+    }
+    .nm { grid-area: nm; }
+    .tot { grid-area: tot; }
+    .bar { grid-area: bar; }
+    .pc { grid-area: pc; }
+  }
 </style>

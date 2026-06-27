@@ -42,7 +42,7 @@
   const CATS = ['all', 'google', 'meta', 'apple', 'telegram', 'yandex', 'twitch', 'cloudflare', 'aws', 'discord', 'games', 'p2p', 'dns', 'other']
 </script>
 
-<div class="head"><h1 class="serif">Traffic</h1><Win /></div>
+<div class="head"><h1 class="serif">Traffic</h1><span class="pgwin"><Win /></span></div>
 <div class="filters">
   <select bind:value={cat}>{#each CATS as c}<option value={c}>{c === 'all' ? 'All categories' : c}</option>{/each}</select>
   <div class="seg">{#each ['all', 'tcp', 'udp'] as p}<button class:on={proto === p} onclick={() => (proto = p)}>{p}</button>{/each}</div>
@@ -52,22 +52,24 @@
 {#if err}<p class="err">Couldn't load traffic. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
   <div class="bar">last {ui.since} · {data.rows.length} of {data.total} flows · sorted by total</div>
   <div class="card">
-    <table>
-      <thead><tr><th>Client</th><th>Category</th><th>Target</th><th>Proto</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th></tr></thead>
-      <tbody>
-        {#each data.rows as f}
-          <tr>
-            <td><a href="#/clients/{encodeURIComponent(f.client)}">{f.client}</a></td>
-            <td><span class="cd" style="background:{catColor(f.category)}"></span>{f.category}</td>
-            <td class="tgt">{f.target}</td>
-            <td class="mono dim">{f.proto}:{f.port}</td>
-            <td class="r mono">{fmtBytes(f.down)}</td>
-            <td class="r mono">{fmtBytes(f.up)}</td>
-            <td class="r mono">{fmtBytes(f.total)}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Client</th><th>Category</th><th>Target</th><th>Proto</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th></tr></thead>
+        <tbody>
+          {#each data.rows as f}
+            <tr>
+              <td><a href="#/clients/{encodeURIComponent(f.client)}">{f.client}</a></td>
+              <td><span class="cd" style="background:{catColor(f.category)}"></span>{f.category}</td>
+              <td class="tgt">{f.target}</td>
+              <td class="mono dim">{f.proto}:{f.port}</td>
+              <td class="r mono">{fmtBytes(f.down)}</td>
+              <td class="r mono">{fmtBytes(f.up)}</td>
+              <td class="r mono">{fmtBytes(f.total)}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
     {#if data.rows.length === 0}<p class="dim pad">No flows match these filters.</p>{/if}
   </div>
 {/if}
@@ -83,6 +85,7 @@
   .seg button.on { background: var(--color-accent-dim); color: var(--color-accent); }
   .bar { color: var(--color-muted); font-size: 12px; margin-bottom: 8px; }
   .card { background: var(--color-s1); border: 1px solid var(--color-border); border-radius: 12px; overflow: hidden; }
+  .tscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
   th { text-align: left; color: var(--color-muted); font-weight: 400; font-size: 11px; padding: 9px 8px; border-bottom: 1px solid var(--color-border); }
   td { padding: 9px 8px; border-bottom: 1px solid var(--color-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -98,4 +101,10 @@
   th:nth-child(2), td:nth-child(2) { width: 14%; }
   th:nth-child(4), td:nth-child(4) { width: 12%; }
   th:nth-child(5), td:nth-child(5), th:nth-child(6), td:nth-child(6), th:nth-child(7), td:nth-child(7) { width: 11%; }
+  @media (max-width: 640px) {
+    .pgwin { display: none; } /* the sticky header already carries the window picker */
+    table { min-width: 600px; }
+    th, td { padding: 8px 7px; }
+    input { flex: 1 1 140px; width: auto; }
+  }
 </style>

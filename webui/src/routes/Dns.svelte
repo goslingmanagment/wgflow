@@ -42,7 +42,7 @@
   const QT = ['all', 'A', 'AAAA', 'CNAME', 'HTTPS']
 </script>
 
-<div class="head"><h1 class="serif">DNS</h1><Win /></div>
+<div class="head"><h1 class="serif">DNS</h1><span class="pgwin"><Win /></span></div>
 <div class="filters">
   <select bind:value={qtype}>{#each QT as t}<option value={t}>{t === 'all' ? 'All types' : t}</option>{/each}</select>
   <button class="tgl" class:on={errorsOnly} onclick={() => (errorsOnly = !errorsOnly)}>errors only</button>
@@ -52,21 +52,23 @@
 {#if err}<p class="err">Couldn't load DNS. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
   <div class="bar">last {ui.since} · {data.records.length} shown · <span class="warn">{data.errors} DNS errors</span></div>
   <div class="card">
-    <table>
-      <thead><tr><th>Time МСК</th><th>Client</th><th>Query</th><th>Type</th><th>Code</th><th>Answer</th></tr></thead>
-      <tbody>
-        {#each data.records as r}
-          <tr>
-            <td class="mono dim">{hhmmssMSK(r.ts)}</td>
-            <td>{r.client}</td>
-            <td class="q">{r.query}</td>
-            <td><span class="qt mono">{r.qtype}</span></td>
-            <td class="mono" class:nx={r.rcode !== 0}>{dnsRcodeName(r.rcode)}</td>
-            <td class="mono dim">{r.answers && r.answers[0] ? r.answers[0].value : '—'}</td>
-          </tr>
-        {/each}
-      </tbody>
-    </table>
+    <div class="tscroll">
+      <table>
+        <thead><tr><th>Time МСК</th><th>Client</th><th>Query</th><th>Type</th><th>Code</th><th>Answer</th></tr></thead>
+        <tbody>
+          {#each data.records as r}
+            <tr>
+              <td class="mono dim">{hhmmssMSK(r.ts)}</td>
+              <td>{r.client}</td>
+              <td class="q">{r.query}</td>
+              <td><span class="qt mono">{r.qtype}</span></td>
+              <td class="mono" class:nx={r.rcode !== 0}>{dnsRcodeName(r.rcode)}</td>
+              <td class="mono dim">{r.answers && r.answers[0] ? r.answers[0].value : '—'}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
     {#if data.records.length === 0}<p class="dim pad">No queries match.</p>{/if}
   </div>
 {/if}
@@ -82,6 +84,7 @@
   .bar { color: var(--color-muted); font-size: 12px; margin-bottom: 8px; }
   .warn { color: var(--color-warn); }
   .card { background: var(--color-s1); border: 1px solid var(--color-border); border-radius: 12px; overflow: hidden; }
+  .tscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; table-layout: fixed; }
   th { text-align: left; color: var(--color-muted); font-weight: 400; font-size: 11px; padding: 9px 8px; border-bottom: 1px solid var(--color-border); }
   td { padding: 8px; border-bottom: 1px solid var(--color-border); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -97,4 +100,10 @@
   th:nth-child(4), td:nth-child(4) { width: 9%; }
   th:nth-child(5), td:nth-child(5) { width: 13%; }
   th:nth-child(6), td:nth-child(6) { width: 18%; }
+  @media (max-width: 640px) {
+    .pgwin { display: none; } /* the sticky header already carries the window picker */
+    table { min-width: 560px; }
+    th, td { padding: 8px 7px; }
+    input { flex: 1 1 140px; width: auto; }
+  }
 </style>

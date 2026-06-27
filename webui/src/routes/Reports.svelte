@@ -63,17 +63,21 @@
   <div class="two">
     <div class="card">
       <h3 class="serif">By client</h3>
-      <table>
-        <thead><tr><th>Client</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th><th class="r">Share</th></tr></thead>
-        <tbody>{#each data.by_client as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / cTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
-      </table>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Client</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th><th class="r">Share</th></tr></thead>
+          <tbody>{#each data.by_client as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / cTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
+        </table>
+      </div>
     </div>
     <div class="card">
       <h3 class="serif">By category</h3>
-      <table>
-        <thead><tr><th>Category</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th><th class="r">Share</th></tr></thead>
-        <tbody>{#each data.by_category as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / kTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
-      </table>
+      <div class="tscroll">
+        <table>
+          <thead><tr><th>Category</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th><th class="r">Share</th></tr></thead>
+          <tbody>{#each data.by_category as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / kTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
+        </table>
+      </div>
     </div>
   </div>
 {/if}
@@ -91,8 +95,9 @@
   .summ b { color: var(--color-text); font-weight: 500; }
   .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
   @media (max-width: 760px) { .two { grid-template-columns: 1fr; } }
-  .card { background: var(--color-s1); border: 1px solid var(--color-border); border-radius: 12px; padding: 14px 16px; }
+  .card { background: var(--color-s1); border: 1px solid var(--color-border); border-radius: 12px; padding: 14px 16px; min-width: 0; }
   h3 { font-size: 16px; font-weight: 500; margin: 0 0 10px; }
+  .tscroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
   table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
   th { text-align: left; color: var(--color-muted); font-weight: 400; font-size: 11px; padding: 6px 6px 6px 0; border-bottom: 1px solid var(--color-border); }
   td { padding: 7px 6px 7px 0; border-bottom: 1px solid var(--color-border); white-space: nowrap; }
@@ -100,4 +105,5 @@
   .r { text-align: right; }
   .dim { color: var(--color-muted); }
   .err { color: var(--color-danger); }
+  @media (max-width: 640px) { table { min-width: 420px; } }
 </style>

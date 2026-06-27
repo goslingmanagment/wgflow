@@ -408,4 +408,64 @@
   .pad {
     padding: 16px;
   }
+
+  /* ---- Phones: reflow each 5-col ledger row into a compact card ----
+     name (+verdict +site) on the left, rate over volume on the right, the
+     category mix as a full-width bar underneath; the sparkline is dropped. */
+  @media (max-width: 640px) {
+    .rowh {
+      display: none;
+    }
+    .row,
+    .phead {
+      grid-template-columns: 1fr auto;
+      column-gap: 12px;
+      row-gap: 1px;
+      padding: 11px 14px;
+    }
+    .row {
+      grid-template-areas:
+        'nm rate'
+        'nm vol'
+        'mix mix';
+    }
+    .phead {
+      grid-template-areas:
+        'nm caret'
+        'nm vol'
+        'mix mix';
+    }
+    .nm {
+      grid-area: nm;
+    }
+    .rate {
+      grid-area: rate;
+    }
+    .vol {
+      grid-area: vol;
+    }
+    .mix {
+      grid-area: mix;
+      margin-top: 7px;
+    }
+    .row .spk {
+      display: none;
+    }
+    .phead .rate {
+      display: none;
+    }
+    .phead .spk.caret {
+      grid-area: caret;
+      justify-content: flex-end;
+    }
+    .row.sub {
+      padding-left: 22px;
+    }
+    .srch {
+      flex: 1 1 auto;
+    }
+    .srch input {
+      width: 100%;
+    }
+  }
 </style>

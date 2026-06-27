@@ -34,6 +34,15 @@ body {
   font-family: var(--font-sans);
   font-size: 14px;
   -webkit-font-smoothing: antialiased;
+  /* iOS Safari: don't inflate text in landscape, kill the grey tap flash. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  -webkit-tap-highlight-color: transparent;
+}
+a,
+button {
+  /* Remove the 300ms tap delay / double-tap zoom on controls (keeps page pinch-zoom). */
+  touch-action: manipulation;
 }
 .mono {
   font-family: var(--font-mono);
@@ -63,6 +72,16 @@ button {
   font-family: inherit;
   font-size: 13px;
   color: var(--color-text);
+}
+/* iOS Safari auto-zooms when focusing a field whose text is < 16px. Bump form
+   fields to 16px on phones to suppress that jarring zoom (buttons are unaffected
+   since they don't take focus-zoom). */
+@media (max-width: 640px) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
 }
 @keyframes pulse {
   0%,

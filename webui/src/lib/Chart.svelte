@@ -80,6 +80,9 @@
   .chart {
     width: 100%;
     position: relative;
+    /* Clip any sub-pixel canvas overshoot before the ResizeObserver settles the
+       exact width — keeps the uPlot canvas from forcing page-wide scroll on mobile. */
+    overflow: hidden;
   }
   .chart :global(.uplot),
   .chart :global(.u-wrap),

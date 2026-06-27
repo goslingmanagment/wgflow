@@ -197,6 +197,7 @@
     top: 0;
     right: 0;
     height: 100vh;
+    height: 100dvh; /* iOS Safari: real visible height, not the toolbar-inflated 100vh */
     width: min(460px, 94vw);
     background: var(--color-s1);
     border-left: 1px solid var(--color-border);
@@ -204,6 +205,7 @@
     display: flex;
     flex-direction: column;
     box-shadow: -16px 0 40px rgba(0, 0, 0, 0.35);
+    overscroll-behavior: contain;
   }
   header {
     display: flex;
@@ -211,6 +213,8 @@
     justify-content: space-between;
     gap: 10px;
     padding: 14px 16px;
+    padding-top: max(14px, env(safe-area-inset-top));
+    padding-right: max(16px, env(safe-area-inset-right));
     border-bottom: 1px solid var(--color-border);
   }
   .title {
@@ -290,8 +294,10 @@
   .srez {
     flex: 1;
     overflow: auto;
+    overscroll-behavior: contain;
     margin: 12px 0 0;
-    padding: 4px 16px 18px;
+    padding: 4px 16px calc(18px + env(safe-area-inset-bottom));
+    padding-right: max(16px, env(safe-area-inset-right));
     font-family: var(--font-mono);
     font-size: 12px;
     line-height: 1.55;

@@ -175,4 +175,16 @@
     color: var(--color-muted);
     font-family: var(--font-mono);
   }
+  @media (max-width: 640px) {
+    .m {
+      grid-template-columns: 38px 1fr auto auto;
+      gap: 7px;
+    }
+    .cd {
+      display: none;
+    }
+    .dom {
+      padding-left: 40px;
+    }
+  }
 </style>

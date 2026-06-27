@@ -122,20 +122,22 @@
   <div class="two">
     <div class="card">
       <div class="ch"><h3 class="serif">Top targets</h3><span class="hint mono" title="Wire bytes are ~94–95% of these totals; packet counts are approximate (GSO/GRO coalescing).">~94–95% (GSO/GRO)</span></div>
-      <table class="t">
-        <thead><tr><th>Target</th><th>Cat</th><th class="r">Down</th><th class="r">Up</th></tr></thead>
-        <tbody>
-          {#each data.top_targets.slice(0, 8) as t}
-            <tr class:bg={t.category === 'apple'}>
-              <td class="tgt" title={t.target}>{t.target}{#if t.is_ip}<span class="noname">· no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}</td>
-              <td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">push/OCSP?</span>{/if}</td>
-              <td class="r mono">{fmtBytes(t.down)}</td>
-              <td class="r mono">{fmtBytes(t.up)}</td>
-            </tr>
-          {/each}
-          {#if data.top_targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
-        </tbody>
-      </table>
+      <div class="tscroll">
+        <table class="t">
+          <thead><tr><th>Target</th><th>Cat</th><th class="r">Down</th><th class="r">Up</th></tr></thead>
+          <tbody>
+            {#each data.top_targets.slice(0, 8) as t}
+              <tr class:bg={t.category === 'apple'}>
+                <td class="tgt" title={t.target}>{t.target}{#if t.is_ip}<span class="noname">· no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}</td>
+                <td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">push/OCSP?</span>{/if}</td>
+                <td class="r mono">{fmtBytes(t.down)}</td>
+                <td class="r mono">{fmtBytes(t.up)}</td>
+              </tr>
+            {/each}
+            {#if data.top_targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
+          </tbody>
+        </table>
+      </div>
     </div>
     <div class="card">
       <div class="ch"><h3 class="serif">Recent sites</h3><span class="hint">TLS · МСК</span></div>
@@ -287,6 +289,9 @@
     border-radius: 12px;
     padding: 14px 16px;
     margin-bottom: 14px;
+    /* Grid items default to min-width:auto, which would let the inner scrollable
+       table expand the column past the viewport; pin to 0 so .tscroll scrolls. */
+    min-width: 0;
   }
   .ch {
     display: flex;
@@ -312,6 +317,10 @@
     .two {
       grid-template-columns: 1fr;
     }
+  }
+  .tscroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
   table.t {
     width: 100%;
@@ -391,5 +400,29 @@
   td.empty {
     text-align: center;
     padding: 16px 0;
+  }
+
+  @media (max-width: 640px) {
+    .kpis {
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+    }
+    .kpi {
+      padding: 10px 12px;
+    }
+    .kpi .v {
+      font-size: 18px;
+    }
+    /* keep the targets table readable: scroll horizontally rather than crush it */
+    table.t {
+      min-width: 420px;
+    }
+    .anchor input {
+      flex: 1 1 140px;
+      width: auto;
+    }
+    .anchor .now {
+      margin-left: 0;
+    }
   }
 </style>
