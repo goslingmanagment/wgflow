@@ -260,6 +260,9 @@ func newAPIFlow(a *TopAgg) apiFlow {
 		targetForCat = resolved
 	}
 	category := a.Category
+	if org != "" {
+		targetForCat += " " + org
+	}
 	if better := categorize(targetForCat, a.Target, a.Proto, a.Port); better != "other" && (category == "" || category == "other" || net.ParseIP(a.Target) != nil) {
 		category = better
 	}

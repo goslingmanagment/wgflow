@@ -129,13 +129,17 @@
             {#each data.top_targets.slice(0, 8) as t}
               <tr class:bg={t.category === 'apple'}>
                 <td class="tgt" title={t.resolved_target ? `${t.resolved_target} · ${t.target}` : t.target}>
-                  <span>{t.resolved_target || t.target}</span>
-                  {#if t.resolved_target}
-                    <span class="noname">· {t.target}</span>
-                  {:else if t.is_ip}
-                    <span class="noname">· no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>
+                  <span class="target-main">{t.resolved_target || t.target}</span>
+                  {#if t.resolved_target || t.is_ip || t.target_org}
+                    <span class="target-meta">
+                      {#if t.resolved_target}
+                        <span>{t.target}</span>
+                      {:else if t.is_ip}
+                        <span>no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>
+                      {/if}
+                      {#if t.target_org}<span class="org">{t.target_org}</span>{/if}
+                    </span>
                   {/if}
-                  {#if t.target_org}<span class="org">{t.target_org}</span>{/if}
                 </td>
                 <td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">push/OCSP?</span>{/if}</td>
                 <td class="r mono">{fmtBytes(t.down)}</td>
@@ -282,18 +286,33 @@
     font-size: 11px;
     margin: -6px 0 14px;
   }
-  .noname {
+  .t td.tgt {
+    white-space: normal;
+    overflow: visible;
+  }
+  .target-main {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .target-meta {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    min-height: 14px;
+    overflow: hidden;
     color: var(--color-muted);
-    margin-left: 6px;
-    font-size: 11px;
+    font-size: 10.5px;
+    white-space: nowrap;
   }
   .org {
     color: var(--color-muted);
     border: 1px solid var(--color-border);
     border-radius: 4px;
     padding: 0 4px;
-    margin-left: 6px;
     font-size: 10px;
+    flex: 0 0 auto;
   }
   .hedge {
     color: var(--color-muted);

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
@@ -1047,17 +1048,83 @@ func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, 
 		return "server-3-173-161-68.ams56.r.cloudfront.net", "Amazon CloudFront"
 	case ip == "3.173.161.31":
 		return "server-3-173-161-31.ams56.r.cloudfront.net", "Amazon CloudFront"
+	case ip == "3.173.161.86":
+		return "server-3-173-161-86.ams56.r.cloudfront.net", "Amazon CloudFront"
+	case ip == "3.171.214.100":
+		return "server-3-171-214-100.fra50.r.cloudfront.net", "Amazon CloudFront"
+	case ip == "3.171.214.77":
+		return "server-3-171-214-77.fra50.r.cloudfront.net", "Amazon CloudFront"
+	case ip == "18.239.36.50":
+		return "server-18-239-36-50.ams58.r.cloudfront.net", "Amazon CloudFront"
+	case ip == "18.239.36.56":
+		return "server-18-239-36-56.ams58.r.cloudfront.net", "Amazon CloudFront"
 	case ip == "99.86.12.89":
 		return "server-99-86-12-89.ams54.r.cloudfront.net", "Amazon CloudFront"
 	case strings.HasPrefix(ip, "71.18.251."):
 		return "", "ByteDance/TikTok edge"
+	case ipPrefix(ip, "149.154.", "91.108.", "91.105."):
+		return "", "Telegram network"
 	case ip == "45.140.39.182" || ip == "45.157.182.3" || ip == "64.72.204.203" || ip == "171.22.220.242" || ip == "209.200.248.83":
 		return "", "unattributed infra"
+	}
+	if proto == "tcp" && port == 443 {
+		if name := reverseTargetName(ip); name != "" {
+			return name, orgForTargetName(name)
+		}
+		if ipPrefix(ip, "3.171.214.", "3.173.161.", "18.239.36.", "99.86.12.") {
+			return "", "Amazon CloudFront"
+		}
 	}
 	if proto == "tcp" && port == 12324 {
 		return "", "unattributed tcp/12324"
 	}
 	return "", ""
+}
+
+type reverseDNSResult struct {
+	name      string
+	expiresAt time.Time
+}
+
+var reverseDNSCache sync.Map
+
+func reverseTargetName(ip string) string {
+	if v, ok := reverseDNSCache.Load(ip); ok {
+		r := v.(reverseDNSResult)
+		if time.Now().Before(r.expiresAt) {
+			return r.name
+		}
+		reverseDNSCache.Delete(ip)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+	names, err := net.DefaultResolver.LookupAddr(ctx, ip)
+	name := ""
+	if err == nil && len(names) > 0 {
+		name = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(names[0])), ".")
+	}
+	ttl := 5 * time.Minute
+	if name != "" {
+		ttl = 12 * time.Hour
+	}
+	reverseDNSCache.Store(ip, reverseDNSResult{name: name, expiresAt: time.Now().Add(ttl)})
+	return name
+}
+
+func orgForTargetName(name string) string {
+	n := strings.ToLower(name)
+	switch {
+	case strings.Contains(n, "cloudfront"):
+		return "Amazon CloudFront"
+	case strings.Contains(n, "storage.yandex") || strings.Contains(n, "yandex"):
+		return "Yandex"
+	case strings.Contains(n, "telegram"):
+		return "Telegram network"
+	case containsAny(n, "bytedance", "tiktok", "capcut", "ibyteimg", "byteimg"):
+		return "ByteDance/TikTok edge"
+	default:
+		return ""
+	}
 }
 
 func suffixIPv4Octet(ip, prefix string) (string, bool) {

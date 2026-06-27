@@ -264,7 +264,7 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 }
 
 func TestNewAPIFlowEnrichesKnownBareIPs(t *testing.T) {
-	f := newAPIFlow(&TopAgg{
+	yandex := newAPIFlow(&TopAgg{
 		Client:   "diana-macbook",
 		Category: "other",
 		Target:   "37.140.178.106",
@@ -273,20 +273,38 @@ func TestNewAPIFlowEnrichesKnownBareIPs(t *testing.T) {
 		Down:     100,
 		Up:       20,
 	})
-	if f.Category != "yandex" {
-		t.Fatalf("Category = %q, want yandex", f.Category)
+	if yandex.Category != "yandex" {
+		t.Fatalf("Category = %q, want yandex", yandex.Category)
 	}
-	if f.ResolvedTarget != "s106nrg.storage.yandex.net" {
-		t.Fatalf("ResolvedTarget = %q", f.ResolvedTarget)
+	if yandex.ResolvedTarget != "s106nrg.storage.yandex.net" {
+		t.Fatalf("ResolvedTarget = %q", yandex.ResolvedTarget)
 	}
-	if f.TargetOrg != "Yandex Storage" {
-		t.Fatalf("TargetOrg = %q", f.TargetOrg)
+	if yandex.TargetOrg != "Yandex Storage" {
+		t.Fatalf("TargetOrg = %q", yandex.TargetOrg)
 	}
-	if !f.IsIP {
+	if !yandex.IsIP {
 		t.Fatalf("IsIP = false, want true")
 	}
-	if f.Total != 120 {
-		t.Fatalf("Total = %d, want 120", f.Total)
+	if yandex.Total != 120 {
+		t.Fatalf("Total = %d, want 120", yandex.Total)
+	}
+
+	cloudfront := newAPIFlow(&TopAgg{
+		Client:   "diana-macbook",
+		Category: "other",
+		Target:   "3.171.214.100",
+		Proto:    "tcp",
+		Port:     443,
+		Down:     10,
+	})
+	if cloudfront.Category != "aws" {
+		t.Fatalf("cloudfront category = %q, want aws", cloudfront.Category)
+	}
+	if cloudfront.ResolvedTarget != "server-3-171-214-100.fra50.r.cloudfront.net" {
+		t.Fatalf("cloudfront resolved target = %q", cloudfront.ResolvedTarget)
+	}
+	if cloudfront.TargetOrg != "Amazon CloudFront" {
+		t.Fatalf("cloudfront target org = %q", cloudfront.TargetOrg)
 	}
 }
 
