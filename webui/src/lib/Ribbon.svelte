@@ -55,7 +55,7 @@
           {:else if domains[m.t] === 'error'}
             <span class="dim">не удалось загрузить</span>
           {:else if domains[m.t]}
-            {#if domains[m.t].tls?.length}<div>🔒 {domains[m.t].tls.join(' · ')}</div>{/if}
+            {#if domains[m.t].tls?.length}<div>Sites: {domains[m.t].tls.join(' · ')}</div>{/if}
             {#if domains[m.t].dns?.length}<div class="dns">DNS: {domains[m.t].dns.join(' · ')}</div>{/if}
             {#if !domains[m.t].tls?.length && !domains[m.t].dns?.length}
               <span class="dim">без имени (QUIC), либо домены вне нерот. логов</span>

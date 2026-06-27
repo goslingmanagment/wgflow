@@ -140,11 +140,16 @@
       </div>
     </div>
     <div class="card">
-      <div class="ch"><h3 class="serif">Recent sites</h3><span class="hint">TLS · МСК</span></div>
+      <div class="ch"><h3 class="serif">Recent sites</h3><span class="hint">TLS/QUIC · МСК</span></div>
       {#each data.recent_tls.slice(0, 6) as r}
-        <div class="li"><Icon name="lock" size={13} /><span class="g">{r.server_name}</span><span class="ago mono">{hhmmMSK(r.ts)}</span></div>
+        <div class="li">
+          <Icon name={r.protocol === 'quic' ? 'activity' : 'lock'} size={13} />
+          <span class="g">{r.server_name}</span>
+          <span class="proto mono" class:quic={r.protocol === 'quic'}>{(r.protocol || 'tls').toUpperCase()}</span>
+          <span class="ago mono">{hhmmMSK(r.ts)}</span>
+        </div>
       {/each}
-      {#if data.recent_tls.length === 0}<div class="empty">No TLS connections recently.</div>{/if}
+      {#if data.recent_tls.length === 0}<div class="empty">No TLS/QUIC handshakes recently.</div>{/if}
       <div class="ch" style="margin-top:12px"><h3 class="serif">Recent DNS</h3><span class="hint">МСК</span></div>
       {#each data.recent_dns.slice(0, 6) as r}
         <div class="li"><span class="qt mono">{r.qtype}</span><span class="g">{r.query}</span>{#if r.rcode !== 0}<span class="nx">{dnsRcodeName(r.rcode)}</span>{:else}<span class="ago mono">{hhmmMSK(r.ts)}</span>{/if}</div>
@@ -380,6 +385,18 @@
   .ago {
     color: var(--color-muted);
     font-size: 11px;
+  }
+  .proto {
+    flex: 0 0 auto;
+    color: var(--color-muted);
+    background: var(--color-s3);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 10px;
+  }
+  .proto.quic {
+    color: var(--color-accent);
+    background: var(--color-accent-dim);
   }
   .nx {
     color: var(--color-warn);

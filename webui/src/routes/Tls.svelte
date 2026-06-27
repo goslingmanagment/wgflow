@@ -37,7 +37,7 @@
   const maxHits = $derived(Math.max(1, ...sites.map((s) => s.hits)))
 </script>
 
-<div class="head"><h1 class="serif">Sites <small>TLS SNI</small></h1><span class="pgwin"><Win /></span></div>
+<div class="head"><h1 class="serif">Sites <small>TLS/QUIC SNI</small></h1><span class="pgwin"><Win /></span></div>
 <div class="filters"><input placeholder="search site" bind:value={q} /><span class="cnt">last {ui.since} · {sites.length} sites</span></div>
 
 {#if err}<p class="err">Couldn't load sites. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
@@ -57,7 +57,12 @@
     <div class="card recent">
       <div class="h">Recent · chronological</div>
       {#each data.recent.slice(0, 8) as r}
-        <div class="rec"><span class="c mono">{r.client}</span><span class="a">→ {r.server_name}</span><span class="tm mono">{ago(r.ts)}</span></div>
+        <div class="rec">
+          <span class="c mono">{r.client}</span>
+          <span class="a">→ {r.server_name}</span>
+          <span class="proto mono" class:quic={r.protocol === 'quic'}>{(r.protocol || 'tls').toUpperCase()}</span>
+          <span class="tm mono">{ago(r.ts)}</span>
+        </div>
       {/each}
     </div>
   {/if}
@@ -89,6 +94,8 @@
   .rec { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 4px 0; }
   .rec .c { color: var(--color-dim); font-size: 11px; }
   .rec .a { color: var(--color-coral); }
+  .proto { flex: 0 0 auto; color: var(--color-muted); background: var(--color-s3); border-radius: 4px; padding: 1px 5px; font-size: 10px; }
+  .proto.quic { color: var(--color-accent); background: var(--color-accent-dim); }
   .rec .tm { margin-left: auto; color: var(--color-muted); font-size: 11px; }
   .dim { color: var(--color-muted); }
   .err { color: var(--color-danger); }
