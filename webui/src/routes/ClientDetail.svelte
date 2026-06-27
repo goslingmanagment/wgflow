@@ -1,6 +1,6 @@
 <script>
   import { ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK } from '../lib/format.js'
+  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph } from '../lib/format.js'
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
@@ -58,7 +58,7 @@
     <VerdictBadge verdict={data.verdict} loggerOk={data.logger_ok} />
   </div>
   {#if data.verdict}
-    <div class="trace">{data.device_kind ? data.device_kind + ' · ' : ''}{traceLine(data.verdict)}</div>
+    <div class="trace">{#if deviceGlyph(data.device_kind)}<span class="dev" title={data.device_kind}>{deviceGlyph(data.device_kind)}</span> {/if}{traceLine(data.verdict)}</div>
   {/if}
 
   <div class="kpis">

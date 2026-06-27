@@ -1,6 +1,6 @@
 <script>
   import { ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, verdictColor } from '../lib/format.js'
+  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, verdictColor, deviceGlyph } from '../lib/format.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
   import Icon from '../lib/Icon.svelte'
@@ -49,6 +49,11 @@
   <p class="dim">Loading…</p>
 {:else}
   <div class="cnt">{rows.length} seen · last {ui.since} · classification inferred</div>
+  {#if data.logger_ok === false}
+    <div class="outage" role="alert">
+      ⚠ Логгер не подтверждён — нулевые строки могут быть сбоем, не тишиной. Тишина не доказана; проверьте System.
+    </div>
+  {/if}
   <div class="ledger">
     <div class="rowh">
       <span>Client · doing now</span><span>net</span><span class="r">rate</span><span class="r">volume</span><span>mix</span>
@@ -58,7 +63,7 @@
         <div class="nm">
           <span class="dot" style="background:{verdictColor(c.verdict?.status)}"></span>
           <div class="tx">
-            <div class="name">{c.name} <VerdictBadge verdict={c.verdict} loggerOk={data.logger_ok} compact /></div>
+            <div class="name">{#if deviceGlyph(c.device_kind)}<span class="dev" title={c.device_kind}>{deviceGlyph(c.device_kind)}</span>{/if}{c.name} <VerdictBadge verdict={c.verdict} loggerOk={data.logger_ok} compact /></div>
             <div class="site">
               {#if c.current_site}<span class="cd" style="background:{catColor(c.top_category)}"></span>→ {c.current_site}{:else}<span class="muted">— {c.top_category || ''}</span>{/if}
             </div>
@@ -130,6 +135,19 @@
     color: var(--color-muted);
     font-size: 12px;
     margin-bottom: 8px;
+  }
+  .outage {
+    background: color-mix(in srgb, var(--color-warn) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warn) 40%, transparent);
+    color: var(--color-warn);
+    border-radius: 9px;
+    padding: 9px 12px;
+    font-size: 12.5px;
+    margin-bottom: 10px;
+  }
+  .dev {
+    margin-right: 5px;
+    font-size: 12px;
   }
   .ledger {
     background: var(--color-s1);

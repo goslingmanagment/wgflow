@@ -137,6 +137,12 @@ export function verdictColor(status) {
   return VERDICT_COLORS[status] || 'var(--color-muted)'
 }
 
+// Device-kind glyph for the "which device?" read. Inferred from the peer name;
+// empty when unknown so we never guess a wrong icon.
+export function deviceGlyph(kind) {
+  return kind === 'phone' ? '📱' : kind === 'laptop' ? '💻' : ''
+}
+
 export const WINDOWS = [
   { value: '5m', label: '5m' },
   { value: '15m', label: '15m' },
