@@ -1,7 +1,10 @@
 wgflow
+/scratchpad/
 webui/node_modules/
 webui/.vite/
 .playwright-cli/
+.playwright-mcp/
+*.png
 *.log
 *.jsonl
 *.db
