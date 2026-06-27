@@ -1,10 +1,11 @@
 <script>
   import { ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago } from '../lib/format.js'
+  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, verdictColor } from '../lib/format.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
   import Icon from '../lib/Icon.svelte'
   import HealthPill from '../lib/HealthPill.svelte'
+  import VerdictBadge from '../lib/VerdictBadge.svelte'
 
   let data = $state(null)
   let err = $state(null)
@@ -47,7 +48,7 @@
 {:else if !data}
   <p class="dim">Loading…</p>
 {:else}
-  <div class="cnt">{rows.length} active · last {ui.since}</div>
+  <div class="cnt">{rows.length} seen · last {ui.since} · classification inferred</div>
   <div class="ledger">
     <div class="rowh">
       <span>Client · doing now</span><span>net</span><span class="r">rate</span><span class="r">volume</span><span>mix</span>
@@ -55,9 +56,9 @@
     {#each rows as c (c.name)}
       <a class="row" href="#/clients/{encodeURIComponent(c.name)}">
         <div class="nm">
-          <span class="dot"></span>
+          <span class="dot" style="background:{verdictColor(c.verdict?.status)}"></span>
           <div class="tx">
-            <div class="name">{c.name}</div>
+            <div class="name">{c.name} <VerdictBadge verdict={c.verdict} loggerOk={data.logger_ok} compact /></div>
             <div class="site">
               {#if c.current_site}<span class="cd" style="background:{catColor(c.top_category)}"></span>→ {c.current_site}{:else}<span class="muted">— {c.top_category || ''}</span>{/if}
             </div>
@@ -172,7 +173,6 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: var(--color-ok);
     flex: 0 0 8px;
   }
   .tx {

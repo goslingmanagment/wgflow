@@ -126,6 +126,17 @@ export function catColor(c) {
   return CAT_COLORS[c] || '#6b7785'
 }
 
+// Verdict status -> dot color. active = the coral active/brand hue; likely-bg =
+// warn amber (deliberately not danger-red); silent = muted grey.
+export const VERDICT_COLORS = {
+  active: 'var(--color-coral)',
+  'likely-background': 'var(--color-warn)',
+  silent: 'var(--color-muted)',
+}
+export function verdictColor(status) {
+  return VERDICT_COLORS[status] || 'var(--color-muted)'
+}
+
 export const WINDOWS = [
   { value: '5m', label: '5m' },
   { value: '15m', label: '15m' },

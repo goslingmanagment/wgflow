@@ -4,7 +4,18 @@
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
-  import HealthPill from '../lib/HealthPill.svelte'
+  import VerdictBadge from '../lib/VerdictBadge.svelte'
+
+  // "last real-use trace" (last >100KB minute), falling back to last-any (last
+  // ping). Never "проснулась" — only a trace, always MSK.
+  function traceLine(v) {
+    if (!v) return ''
+    const sig = v.last_significant_at
+    const any = v.evidence?.last_any_at
+    if (sig) return `последний заметный след ${hhmmMSK(sig)} МСК (${ago(sig)})`
+    if (any) return `последний след ${hhmmMSK(any)} МСК (${ago(any)})`
+    return 'нет заметных следов в окне'
+  }
 
   let { param } = $props()
   let data = $state(null)
@@ -44,8 +55,11 @@
 {:else}
   <div class="who">
     <h1 class="serif">{data.name}</h1>
-    <HealthPill />
+    <VerdictBadge verdict={data.verdict} loggerOk={data.logger_ok} />
   </div>
+  {#if data.verdict}
+    <div class="trace">{data.device_kind ? data.device_kind + ' · ' : ''}{traceLine(data.verdict)}</div>
+  {/if}
 
   <div class="kpis">
     <div class="kpi"><div class="k">Rate · last {ui.since}</div><div class="v mono">{fmtRate(data.total, secs)} <small>Mbit/s</small></div></div>
@@ -116,6 +130,11 @@
     display: flex;
     align-items: center;
     gap: 12px;
+    margin-bottom: 6px;
+  }
+  .trace {
+    color: var(--color-muted);
+    font-size: 12.5px;
     margin-bottom: 16px;
   }
   h1 {
