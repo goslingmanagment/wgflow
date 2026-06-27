@@ -237,14 +237,16 @@ type apiCatShare struct {
 }
 
 type apiFlow struct {
-	Client   string `json:"client"`
-	Category string `json:"category"`
-	Target   string `json:"target"`
-	Proto    string `json:"proto"`
-	Port     uint16 `json:"port"`
-	Down     uint64 `json:"down"`
-	Up       uint64 `json:"up"`
-	Total    uint64 `json:"total"`
+	Client         string `json:"client"`
+	Category       string `json:"category"`
+	Target         string `json:"target"`
+	ResolvedTarget string `json:"resolved_target,omitempty"`
+	TargetOrg      string `json:"target_org,omitempty"`
+	Proto          string `json:"proto"`
+	Port           uint16 `json:"port"`
+	Down           uint64 `json:"down"`
+	Up             uint64 `json:"up"`
+	Total          uint64 `json:"total"`
 	// IsIP marks a target we could not resolve to a hostname (no SNI, no DNS) —
 	// usually QUIC. The UI labels these "no hostname (QUIC)" instead of showing a
 	// bare IP that reads like a fabricated or missing domain.
@@ -252,10 +254,26 @@ type apiFlow struct {
 }
 
 func newAPIFlow(a *TopAgg) apiFlow {
+	resolved, org := enrichTarget(a.Target, "", a.Proto, a.Port)
+	targetForCat := a.Target
+	if resolved != "" {
+		targetForCat = resolved
+	}
+	category := a.Category
+	if better := categorize(targetForCat, a.Target, a.Proto, a.Port); better != "other" && (category == "" || category == "other" || net.ParseIP(a.Target) != nil) {
+		category = better
+	}
 	return apiFlow{
-		Client: a.Client, Category: a.Category, Target: a.Target, Proto: a.Proto, Port: a.Port,
+		Client: a.Client, Category: category, Target: a.Target, ResolvedTarget: resolved, TargetOrg: org, Proto: a.Proto, Port: a.Port,
 		Down: a.Down, Up: a.Up, Total: a.Down + a.Up, IsIP: net.ParseIP(a.Target) != nil,
 	}
+}
+
+func apiFlowDisplayTarget(f apiFlow) string {
+	if f.ResolvedTarget != "" {
+		return f.ResolvedTarget
+	}
+	return f.Target
 }
 
 type apiClient struct {
@@ -910,10 +928,11 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	cat := map[string]uint64{}
 	targets := make([]apiFlow, 0, len(aggList))
 	for _, a := range aggList {
+		f := newAPIFlow(a)
 		down += a.Down
 		up += a.Up
-		cat[a.Category] += a.Down + a.Up
-		targets = append(targets, newAPIFlow(a))
+		cat[f.Category] += f.Total
+		targets = append(targets, f)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Total > targets[j].Total })
 	if len(targets) > 20 {
@@ -1297,16 +1316,18 @@ func (s *webServer) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	aggregateFromRollup(s.rollupPath, cutoff, clientFilter, aggs)
 	rows := make([]apiFlow, 0, len(aggs))
 	for _, a := range aggs {
-		if catFilter != "" && catFilter != "all" && a.Category != catFilter {
+		f := newAPIFlow(a)
+		if catFilter != "" && catFilter != "all" && f.Category != catFilter {
 			continue
 		}
-		if protoFilter != "" && protoFilter != "all" && a.Proto != protoFilter {
+		if protoFilter != "" && protoFilter != "all" && f.Proto != protoFilter {
 			continue
 		}
-		if search != "" && !strings.Contains(strings.ToLower(a.Target), search) {
+		searchText := strings.ToLower(f.Target + " " + f.ResolvedTarget + " " + f.TargetOrg)
+		if search != "" && !strings.Contains(searchText, search) {
 			continue
 		}
-		rows = append(rows, newAPIFlow(a))
+		rows = append(rows, f)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Total > rows[j].Total })
 	total := len(rows)
@@ -1337,15 +1358,16 @@ func (s *webServer) handleCategories(w http.ResponseWriter, r *http.Request) {
 	}
 	m := map[string]*acc{}
 	for _, a := range aggs {
-		x := m[a.Category]
+		f := newAPIFlow(a)
+		x := m[f.Category]
 		if x == nil {
 			x = &acc{clients: map[string]uint64{}, targets: map[string]uint64{}}
-			m[a.Category] = x
+			m[f.Category] = x
 		}
-		x.down += a.Down
-		x.up += a.Up
-		x.clients[a.Client] += a.Down + a.Up
-		x.targets[a.Target] += a.Down + a.Up
+		x.down += f.Down
+		x.up += f.Up
+		x.clients[f.Client] += f.Total
+		x.targets[apiFlowDisplayTarget(f)] += f.Total
 	}
 	out := make([]apiCategory, 0, len(m))
 	for cat, x := range m {

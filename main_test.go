@@ -244,6 +244,10 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 		{"d111111abcdef8.cloudfront.net", "", "aws"},
 		{"telemetry-in.battle.net", "", "games"},
 		{"one.one.one.one", "1.1.1.1", "dns"},
+		{"", "37.140.178.106", "yandex"},
+		{"", "5.255.221.166", "yandex"},
+		{"mcs-normal-sg.capcutapi.com", "", "bytedance"},
+		{"p16-heycan-file-sign-sg.ibyteimg.com", "", "bytedance"},
 		{"api.vk.com", "", "vk"},
 		{"sun9-1.userapi.com", "", "vk"},
 		{"ipv4-c001.nflxvideo.net", "", "netflix"},
@@ -256,6 +260,33 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 		if got := categorize(tc.target, tc.ip, "tcp", 443); got != tc.want {
 			t.Fatalf("categorize(%q, %q) = %q, want %q", tc.target, tc.ip, got, tc.want)
 		}
+	}
+}
+
+func TestNewAPIFlowEnrichesKnownBareIPs(t *testing.T) {
+	f := newAPIFlow(&TopAgg{
+		Client:   "diana-macbook",
+		Category: "other",
+		Target:   "37.140.178.106",
+		Proto:    "tcp",
+		Port:     443,
+		Down:     100,
+		Up:       20,
+	})
+	if f.Category != "yandex" {
+		t.Fatalf("Category = %q, want yandex", f.Category)
+	}
+	if f.ResolvedTarget != "s106nrg.storage.yandex.net" {
+		t.Fatalf("ResolvedTarget = %q", f.ResolvedTarget)
+	}
+	if f.TargetOrg != "Yandex Storage" {
+		t.Fatalf("TargetOrg = %q", f.TargetOrg)
+	}
+	if !f.IsIP {
+		t.Fatalf("IsIP = false, want true")
+	}
+	if f.Total != 120 {
+		t.Fatalf("Total = %d, want 120", f.Total)
 	}
 }
 

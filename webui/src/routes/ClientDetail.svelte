@@ -128,7 +128,15 @@
           <tbody>
             {#each data.top_targets.slice(0, 8) as t}
               <tr class:bg={t.category === 'apple'}>
-                <td class="tgt" title={t.target}>{t.target}{#if t.is_ip}<span class="noname">· no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}</td>
+                <td class="tgt" title={t.resolved_target ? `${t.resolved_target} · ${t.target}` : t.target}>
+                  <span>{t.resolved_target || t.target}</span>
+                  {#if t.resolved_target}
+                    <span class="noname">· {t.target}</span>
+                  {:else if t.is_ip}
+                    <span class="noname">· no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>
+                  {/if}
+                  {#if t.target_org}<span class="org">{t.target_org}</span>{/if}
+                </td>
                 <td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">push/OCSP?</span>{/if}</td>
                 <td class="r mono">{fmtBytes(t.down)}</td>
                 <td class="r mono">{fmtBytes(t.up)}</td>
@@ -278,6 +286,14 @@
     color: var(--color-muted);
     margin-left: 6px;
     font-size: 11px;
+  }
+  .org {
+    color: var(--color-muted);
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0 4px;
+    margin-left: 6px;
+    font-size: 10px;
   }
   .hedge {
     color: var(--color-muted);

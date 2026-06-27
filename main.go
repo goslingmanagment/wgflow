@@ -981,12 +981,14 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 		return "meta"
 	case containsAny(t, "youtube", "googlevideo", "ytimg", "googleapis", "googleusercontent") || ipPrefix(ip, "142.250.", "142.251.", "172.217.", "173.194.", "74.125.", "216.239."):
 		return "google"
-	case containsAny(t, "yandex", "strm.yandex", "appmetrica") || ipPrefix(ip, "87.250.", "213.180.", "37.9.", "5.45."):
+	case containsAny(t, "yandex", "yastatic", "ya.ru", "strm.yandex", "appmetrica") || ipPrefix(ip, "87.250.", "213.180.", "37.9.", "37.140.", "5.45.", "5.255.", "77.88."):
 		return "yandex"
 	case containsAny(t, "icloud", "apple.com", "mzstatic", "itunes", "aaplimg") || ipPrefix(ip, "17."):
 		return "apple"
 	case containsAny(t, "telegram", "t.me") || ipPrefix(ip, "149.154.", "91.108.", "91.105."):
 		return "telegram"
+	case containsAny(t, "tiktok", "tiktokcdn", "tiktokv", "capcut", "capcutapi", "ibyteimg", "byteimg", "byteoversea", "snssdk", "muscdn", "pstatp") || ipPrefix(ip, "71.18."):
+		return "bytedance"
 	case containsAny(t, "vk.com", "vkontakte", "userapi.com", "vk-cdn", "mycdn.me", "vkuser", "vkgroup", "vk.me") || ipPrefix(ip, "87.240.", "93.186.", "95.142.", "95.213."):
 		return "vk"
 	case containsAny(t, "netflix", "nflxvideo", "nflximg", "nflxext", "nflxso"):
@@ -1022,6 +1024,52 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 	default:
 		return "other"
 	}
+}
+
+func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, targetOrg string) {
+	ip := target
+	if net.ParseIP(ip) == nil {
+		ip = remoteIP
+	}
+	if net.ParseIP(ip) == nil {
+		return "", ""
+	}
+	switch {
+	case strings.HasPrefix(ip, "37.140.178."):
+		if octet, ok := suffixIPv4Octet(ip, "37.140.178."); ok {
+			return "s" + octet + "nrg.storage.yandex.net", "Yandex Storage"
+		}
+	case strings.HasPrefix(ip, "5.255.221."):
+		if octet, ok := suffixIPv4Octet(ip, "5.255.221."); ok {
+			return "s" + octet + "klg.storage.yandex.net", "Yandex Storage"
+		}
+	case ip == "3.173.161.68":
+		return "server-3-173-161-68.ams56.r.cloudfront.net", "Amazon CloudFront"
+	case ip == "3.173.161.31":
+		return "server-3-173-161-31.ams56.r.cloudfront.net", "Amazon CloudFront"
+	case ip == "99.86.12.89":
+		return "server-99-86-12-89.ams54.r.cloudfront.net", "Amazon CloudFront"
+	case strings.HasPrefix(ip, "71.18.251."):
+		return "", "ByteDance/TikTok edge"
+	case ip == "45.140.39.182" || ip == "45.157.182.3" || ip == "64.72.204.203" || ip == "171.22.220.242" || ip == "209.200.248.83":
+		return "", "unattributed infra"
+	}
+	if proto == "tcp" && port == 12324 {
+		return "", "unattributed tcp/12324"
+	}
+	return "", ""
+}
+
+func suffixIPv4Octet(ip, prefix string) (string, bool) {
+	s, ok := strings.CutPrefix(ip, prefix)
+	if !ok || strings.Contains(s, ".") {
+		return "", false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 || n > 255 {
+		return "", false
+	}
+	return s, true
 }
 
 func containsAny(s string, needles ...string) bool {

@@ -123,6 +123,7 @@ export const CAT_COLORS = {
   // (was #9aa7b4, a near-twin of `other`).
   apple: '#9fb8d4',
   telegram: '#1baf7a',
+  bytedance: '#00b3a4',
   // yandex: crimson, off the coral brand hue (#e06a3f) it used to collide with.
   yandex: '#e5263b',
   twitch: '#9146ff',

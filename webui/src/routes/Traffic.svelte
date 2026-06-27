@@ -39,7 +39,7 @@
       err = errorMessage(e)
     }
   }
-  const CATS = ['all', 'google', 'meta', 'apple', 'telegram', 'yandex', 'twitch', 'cloudflare', 'aws', 'discord', 'games', 'p2p', 'dns', 'other']
+  const CATS = ['all', 'google', 'meta', 'apple', 'telegram', 'yandex', 'bytedance', 'fansly', 'twitch', 'cloudflare', 'aws', 'discord', 'games', 'p2p', 'dns', 'other']
 </script>
 
 <div class="head"><h1 class="serif">Traffic</h1><span class="pgwin"><Win /></span></div>
@@ -60,7 +60,11 @@
             <tr>
               <td><a href="#/clients/{encodeURIComponent(f.client)}">{f.client}</a></td>
               <td><span class="cd" style="background:{catColor(f.category)}"></span>{f.category}</td>
-              <td class="tgt">{f.target}</td>
+              <td class="tgt" title={f.resolved_target ? `${f.resolved_target} · ${f.target}` : f.target}>
+                <span>{f.resolved_target || f.target}</span>
+                {#if f.resolved_target}<span class="sub">· {f.target}</span>{/if}
+                {#if f.target_org}<span class="org">{f.target_org}</span>{/if}
+              </td>
               <td class="mono dim">{f.proto}:{f.port}</td>
               <td class="r mono">{fmtBytes(f.down)}</td>
               <td class="r mono">{fmtBytes(f.up)}</td>
@@ -93,6 +97,8 @@
   td a:hover { color: var(--color-coral); }
   .r { text-align: right; }
   .tgt { color: var(--color-text); }
+  .sub { color: var(--color-muted); margin-left: 6px; font-size: 11px; }
+  .org { color: var(--color-muted); border: 1px solid var(--color-border); border-radius: 4px; padding: 0 4px; margin-left: 6px; font-size: 10px; }
   .dim { color: var(--color-muted); }
   .cd { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
   .err { color: var(--color-danger); }
