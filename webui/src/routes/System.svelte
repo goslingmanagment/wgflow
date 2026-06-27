@@ -1,21 +1,27 @@
 <script>
-  import { refresh } from '../lib/store.svelte.js'
+  import { trackRefreshTick } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtShort, uptime, ago } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import HealthPill from '../lib/HealthPill.svelte'
 
   let data = $state(null)
   let err = $state(null)
+  const runLatest = createLatestRunner()
   $effect(() => {
-    const tick = refresh.tick
+    trackRefreshTick()
     load()
   })
   async function load() {
-    try {
-      data = await getJSON('/api/system')
-      err = null
-    } catch (e) {
-      err = e.message
-    }
+    await runLatest(
+      () => getJSON('/api/system'),
+      (next) => {
+        data = next
+        err = null
+      },
+      (e) => {
+        err = errorMessage(e)
+      },
+    )
   }
   const st = $derived(data?.stats || {})
   const cfg = $derived(data?.config || {})

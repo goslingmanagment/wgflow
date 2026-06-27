@@ -1,6 +1,7 @@
 <script>
-  import { refresh, ui } from '../lib/store.svelte.js'
+  import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { dnsRcodeName, getJSON, hhmmssMSK } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Win from '../lib/Win.svelte'
 
   let data = $state(null)
@@ -8,10 +9,11 @@
   let qtype = $state('all')
   let errorsOnly = $state(false)
   let q = $state('')
+  const runLatest = createLatestRunner()
 
   $effect(() => {
+    trackRefreshTick()
     const s = ui.since,
-      tick = refresh.tick,
       t = qtype,
       e = errorsOnly,
       qq = q
@@ -23,10 +25,18 @@
       if (t !== 'all') u.set('qtype', t)
       if (e) u.set('errors', '1')
       if (qq) u.set('q', qq)
-      data = await getJSON('/api/dns?' + u.toString())
-      err = null
+      await runLatest(
+        () => getJSON('/api/dns?' + u.toString()),
+        (next) => {
+          data = next
+          err = null
+        },
+        (e2) => {
+          err = errorMessage(e2)
+        },
+      )
     } catch (e2) {
-      err = e2.message
+      err = errorMessage(e2)
     }
   }
   const QT = ['all', 'A', 'AAAA', 'CNAME', 'HTTPS']

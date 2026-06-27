@@ -1,6 +1,7 @@
 <script>
-  import { refresh } from '../lib/store.svelte.js'
+  import { trackRefreshTick } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Icon from '../lib/Icon.svelte'
 
   const WINS = [
@@ -13,19 +14,24 @@
   let since = $state('24h')
   let data = $state(null)
   let err = $state(null)
+  const runLatest = createLatestRunner()
 
   $effect(() => {
+    trackRefreshTick()
     const s = since
-    const tick = refresh.tick
     load(s)
   })
   async function load(s) {
-    try {
-      data = await getJSON('/api/report?since=' + s)
-      err = null
-    } catch (e) {
-      err = e.message
-    }
+    await runLatest(
+      () => getJSON('/api/report?since=' + s),
+      (next) => {
+        data = next
+        err = null
+      },
+      (e) => {
+        err = errorMessage(e)
+      },
+    )
   }
   const cTotal = $derived((data?.by_client || []).reduce((a, r) => a + r.total, 0) || 1)
   const kTotal = $derived((data?.by_category || []).reduce((a, r) => a + r.total, 0) || 1)

@@ -1,6 +1,7 @@
 <script>
-  import { refresh, setGroup, ui } from '../lib/store.svelte.js'
+  import { setGroup, trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, verdictColor, deviceGlyph } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
   import Icon from '../lib/Icon.svelte'
@@ -13,19 +14,24 @@
   let search = $state('')
   let sort = $state('total')
   let srezOpen = $state(false)
+  const runLatest = createLatestRunner()
 
   $effect(() => {
+    trackRefreshTick()
     const s = ui.since
-    const tick = refresh.tick
     load(s)
   })
   async function load(s) {
-    try {
-      data = await getJSON('/api/clients?since=' + s)
-      err = null
-    } catch (e) {
-      err = e.message
-    }
+    await runLatest(
+      () => getJSON('/api/clients?since=' + s),
+      (next) => {
+        data = next
+        err = null
+      },
+      (e) => {
+        err = errorMessage(e)
+      },
+    )
   }
 
   let manualOpen = $state(new Set())

@@ -1,6 +1,7 @@
 <script>
-  import { refresh, ui } from '../lib/store.svelte.js'
+  import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
@@ -23,6 +24,7 @@
   let err = $state(null)
   let fromAnchor = $state(null) // unix seconds, or null = relative window
   let anchorInput = $state('')
+  const runLatest = createLatestRunner()
 
   // Reset any anchor when switching clients (declared first so it runs before the
   // loader, which would otherwise fire once with the previous client's anchor).
@@ -32,10 +34,10 @@
     anchorInput = ''
   })
   $effect(() => {
+    trackRefreshTick()
     const n = param
     const s = ui.since
     const f = fromAnchor
-    const tick = refresh.tick
     load(n, s, f)
   })
   async function load(n, s, f) {
@@ -43,10 +45,18 @@
       const u = new URLSearchParams()
       if (f) u.set('from', f)
       else u.set('since', s)
-      data = await getJSON('/api/clients/' + encodeURIComponent(n) + '?' + u.toString())
-      err = null
+      await runLatest(
+        () => getJSON('/api/clients/' + encodeURIComponent(n) + '?' + u.toString()),
+        (next) => {
+          data = next
+          err = null
+        },
+        (e) => {
+          err = errorMessage(e)
+        },
+      )
     } catch (e) {
-      err = e.message
+      err = errorMessage(e)
     }
   }
   function applyAnchor() {

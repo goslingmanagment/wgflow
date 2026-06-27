@@ -1,6 +1,7 @@
 <script>
-  import { refresh, ui } from '../lib/store.svelte.js'
+  import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, catColor } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Win from '../lib/Win.svelte'
 
   let data = $state(null)
@@ -8,10 +9,11 @@
   let cat = $state('all')
   let proto = $state('all')
   let q = $state('')
+  const runLatest = createLatestRunner()
 
   $effect(() => {
+    trackRefreshTick()
     const s = ui.since,
-      tick = refresh.tick,
       c = cat,
       p = proto,
       qq = q
@@ -23,10 +25,18 @@
       if (c !== 'all') u.set('category', c)
       if (p !== 'all') u.set('proto', p)
       if (qq) u.set('q', qq)
-      data = await getJSON('/api/traffic?' + u.toString())
-      err = null
+      await runLatest(
+        () => getJSON('/api/traffic?' + u.toString()),
+        (next) => {
+          data = next
+          err = null
+        },
+        (e) => {
+          err = errorMessage(e)
+        },
+      )
     } catch (e) {
-      err = e.message
+      err = errorMessage(e)
     }
   }
   const CATS = ['all', 'google', 'meta', 'apple', 'telegram', 'yandex', 'twitch', 'cloudflare', 'aws', 'discord', 'games', 'p2p', 'dns', 'other']

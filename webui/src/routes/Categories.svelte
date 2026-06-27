@@ -1,23 +1,29 @@
 <script>
-  import { refresh, ui } from '../lib/store.svelte.js'
+  import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, catColor } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Win from '../lib/Win.svelte'
   import Donut from '../lib/Donut.svelte'
 
   let data = $state(null)
   let err = $state(null)
+  const runLatest = createLatestRunner()
   $effect(() => {
+    trackRefreshTick()
     const s = ui.since
-    const tick = refresh.tick
     load(s)
   })
   async function load(s) {
-    try {
-      data = await getJSON('/api/categories?since=' + s)
-      err = null
-    } catch (e) {
-      err = e.message
-    }
+    await runLatest(
+      () => getJSON('/api/categories?since=' + s),
+      (next) => {
+        data = next
+        err = null
+      },
+      (e) => {
+        err = errorMessage(e)
+      },
+    )
   }
   const list = $derived(data?.categories || [])
   const total = $derived(list.reduce((s, c) => s + c.total, 0) || 1)

@@ -1,6 +1,7 @@
 <script>
   import { getJSON, fmtBytes, hhmmMSK } from './format.js'
-  import { refresh } from './store.svelte.js'
+  import { createLatestRunner, errorMessage } from './load.js'
+  import { trackRefreshTick } from './store.svelte.js'
 
   // The Срез drawer. It assembles ONE plain-text verdict block, renders that
   // exact string, and copies that exact string — so the screen and the clipboard
@@ -15,34 +16,42 @@
   let copied = $state(false)
   let copyErr = $state(false)
   let snapWin = $state('')
-  let loadSeq = 0
+  const runLatest = createLatestRunner()
 
   const CAVEAT =
     '⚠ inferred из метаданных. HTTPS не виден; QUIC даёт IP без имени; ' +
     '«проснулась» недоказуемо — только первый заметный след. Байты ~94–95% (GSO/GRO).'
 
   $effect(() => {
-    const tick = refresh.tick
+    trackRefreshTick()
     if (open) load(win, names.join(','))
   })
 
   async function load(w, clients) {
-    const seq = ++loadSeq
     loading = true
-    snap = null
-    snapWin = ''
+    if (snapWin && snapWin !== w) {
+      snap = null
+      snapWin = ''
+    }
     err = null
     try {
       const u = new URLSearchParams({ since: w })
       if (clients) u.set('clients', clients)
-      const next = await getJSON('/api/snapshot?' + u.toString())
-      if (seq !== loadSeq) return
-      snap = next
-      snapWin = w
+      const applied = await runLatest(
+        () => getJSON('/api/snapshot?' + u.toString()),
+        (next) => {
+          snap = next
+          snapWin = w
+          err = null
+        },
+        (e) => {
+          err = errorMessage(e)
+        },
+      )
+      if (applied) loading = false
     } catch (e) {
-      if (seq === loadSeq) err = e.message
-    } finally {
-      if (seq === loadSeq) loading = false
+      err = errorMessage(e)
+      loading = false
     }
   }
 

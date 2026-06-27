@@ -80,6 +80,11 @@ export function maybeAutoRefresh(visible = true, now = Date.now()) {
   requestRefresh(now)
 }
 
+export function trackRefreshTick() {
+  // Call inside route $effect blocks to make data reload on the shared refresh tick.
+  return refresh.tick
+}
+
 // --- Logger health verdict -------------------------------------------------
 // One honest signal, shared by every status chip. It must never look healthier
 // than the logger actually is, so it folds in two independent freshness checks:

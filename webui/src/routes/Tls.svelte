@@ -1,15 +1,17 @@
 <script>
-  import { refresh, ui } from '../lib/store.svelte.js'
+  import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { getJSON, catColor, ago } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Win from '../lib/Win.svelte'
 
   let data = $state(null)
   let err = $state(null)
   let q = $state('')
+  const runLatest = createLatestRunner()
 
   $effect(() => {
+    trackRefreshTick()
     const s = ui.since,
-      tick = refresh.tick,
       qq = q
     load(s, qq)
   })
@@ -17,10 +19,18 @@
     try {
       const u = new URLSearchParams({ since: s })
       if (qq) u.set('q', qq)
-      data = await getJSON('/api/tls?' + u.toString())
-      err = null
+      await runLatest(
+        () => getJSON('/api/tls?' + u.toString()),
+        (next) => {
+          data = next
+          err = null
+        },
+        (e) => {
+          err = errorMessage(e)
+        },
+      )
     } catch (e) {
-      err = e.message
+      err = errorMessage(e)
     }
   }
   const sites = $derived(data?.sites || [])

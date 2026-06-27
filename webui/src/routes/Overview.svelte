@@ -1,6 +1,7 @@
 <script>
-  import { refresh, ui } from '../lib/store.svelte.js'
+  import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { getJSON, fmtBytes, fmtShort, catColor } from '../lib/format.js'
+  import { createLatestRunner, errorMessage } from '../lib/load.js'
   import Chart from '../lib/Chart.svelte'
   import Mix from '../lib/Mix.svelte'
 
@@ -9,28 +10,32 @@
   let clients = $state(null)
   let cats = $state(null)
   let err = $state(null)
+  const runLatest = createLatestRunner()
 
   $effect(() => {
+    trackRefreshTick()
     const s = ui.since
-    const tick = refresh.tick
     load(s)
   })
   async function load(s) {
-    try {
-      const [a, b, c, d] = await Promise.all([
+    await runLatest(
+      () => Promise.all([
         getJSON('/api/system'),
         getJSON('/api/throughput?since=' + s),
         getJSON('/api/clients?since=' + s),
         getJSON('/api/categories?since=' + s),
-      ])
-      sys = a
-      thr = b
-      clients = c
-      cats = d
-      err = null
-    } catch (e) {
-      err = e.message
-    }
+      ]),
+      ([a, b, c, d]) => {
+        sys = a
+        thr = b
+        clients = c
+        cats = d
+        err = null
+      },
+      (e) => {
+        err = errorMessage(e)
+      },
+    )
   }
 
   const st = $derived(sys?.stats || {})
