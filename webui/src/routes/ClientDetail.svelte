@@ -53,6 +53,7 @@
     <div class="kpi"><div class="k">Upload</div><div class="v mono">{fmtBytes(data.up)}</div></div>
     <div class="kpi"><div class="k">Top category</div><div class="v"><span class="cd" style="background:{catColor(data.categories[0]?.category)}"></span>{data.categories[0]?.category || '—'}</div></div>
   </div>
+  <div class="caveat" title="Wire bytes are ~94–95% of these totals and packet counts are approximate: the kernel coalesces segments (GSO/GRO) before wgflow counts them. HTTPS payloads are never inspected.">~94–95% of bytes · packets approximate (GSO/GRO)</div>
 
   {#if seriesPoints.length > 1}
     <div class="card">
@@ -68,12 +69,17 @@
 
   <div class="two">
     <div class="card">
-      <div class="ch"><h3 class="serif">Top targets</h3></div>
+      <div class="ch"><h3 class="serif">Top targets</h3><span class="hint mono" title="Wire bytes are ~94–95% of these totals; packet counts are approximate (GSO/GRO coalescing).">~94–95% (GSO/GRO)</span></div>
       <table class="t">
         <thead><tr><th>Target</th><th>Cat</th><th class="r">Down</th><th class="r">Up</th></tr></thead>
         <tbody>
           {#each data.top_targets.slice(0, 8) as t}
-            <tr><td class="tgt" title={t.target}>{t.target}</td><td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}</td><td class="r mono">{fmtBytes(t.down)}</td><td class="r mono">{fmtBytes(t.up)}</td></tr>
+            <tr class:bg={t.category === 'apple'}>
+              <td class="tgt" title={t.target}>{t.target}{#if t.is_ip}<span class="noname">· no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}</td>
+              <td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">push/OCSP?</span>{/if}</td>
+              <td class="r mono">{fmtBytes(t.down)}</td>
+              <td class="r mono">{fmtBytes(t.up)}</td>
+            </tr>
           {/each}
           {#if data.top_targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
         </tbody>
@@ -148,6 +154,26 @@
     height: 8px;
     border-radius: 2px;
     margin-right: 6px;
+  }
+  .caveat {
+    text-align: right;
+    color: var(--color-muted);
+    font-size: 11px;
+    margin: -6px 0 14px;
+  }
+  .noname {
+    color: var(--color-muted);
+    margin-left: 6px;
+    font-size: 11px;
+  }
+  .hedge {
+    color: var(--color-muted);
+    margin-left: 7px;
+    font-size: 10px;
+    cursor: help;
+  }
+  tr.bg .tgt {
+    color: var(--color-dim);
   }
   .card {
     background: var(--color-s1);

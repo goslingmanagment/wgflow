@@ -11,6 +11,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -190,6 +191,17 @@ type apiFlow struct {
 	Down     uint64 `json:"down"`
 	Up       uint64 `json:"up"`
 	Total    uint64 `json:"total"`
+	// IsIP marks a target we could not resolve to a hostname (no SNI, no DNS) —
+	// usually QUIC. The UI labels these "no hostname (QUIC)" instead of showing a
+	// bare IP that reads like a fabricated or missing domain.
+	IsIP bool `json:"is_ip"`
+}
+
+func newAPIFlow(a *TopAgg) apiFlow {
+	return apiFlow{
+		Client: a.Client, Category: a.Category, Target: a.Target, Proto: a.Proto, Port: a.Port,
+		Down: a.Down, Up: a.Up, Total: a.Down + a.Up, IsIP: net.ParseIP(a.Target) != nil,
+	}
 }
 
 type apiClient struct {
@@ -432,7 +444,7 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		down += a.Down
 		up += a.Up
 		cat[a.Category] += a.Down + a.Up
-		targets = append(targets, apiFlow{Client: a.Client, Category: a.Category, Target: a.Target, Proto: a.Proto, Port: a.Port, Down: a.Down, Up: a.Up, Total: a.Down + a.Up})
+		targets = append(targets, newAPIFlow(a))
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Total > targets[j].Total })
 	if len(targets) > 20 {
@@ -596,7 +608,7 @@ func (s *webServer) handleTraffic(w http.ResponseWriter, r *http.Request) {
 		if search != "" && !strings.Contains(strings.ToLower(a.Target), search) {
 			continue
 		}
-		rows = append(rows, apiFlow{Client: a.Client, Category: a.Category, Target: a.Target, Proto: a.Proto, Port: a.Port, Down: a.Down, Up: a.Up, Total: a.Down + a.Up})
+		rows = append(rows, newAPIFlow(a))
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].Total > rows[j].Total })
 	total := len(rows)
