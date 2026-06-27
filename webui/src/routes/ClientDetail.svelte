@@ -27,10 +27,11 @@
   const secs = $derived(sinceSeconds(ui.since))
   const seriesPoints = $derived.by(() => {
     const arr = data?.series || []
-    if (arr.length < 2) return []
-    const nowSec = Math.floor(Date.now() / 1000)
-    const n = arr.length
-    return arr.map((b, i) => ({ t: nowSec - (n - 1 - i) * 60, v: (b * 8) / 60 / 1e6 }))
+    const start = data?.series_start_minute
+    // Anchor the x-axis to the server's minute timestamps, not the browser clock,
+    // so it matches the window (and MSK labels) the owner is reconstructing.
+    if (arr.length < 2 || !start) return []
+    return arr.map((b, i) => ({ t: (start + i) * 60, v: (b * 8) / 60 / 1e6 }))
   })
 </script>
 

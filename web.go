@@ -439,17 +439,20 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		targets = targets[:20]
 	}
 	writeJSON(w, map[string]any{
-		"name":        name,
-		"since":       d.String(),
-		"down":        down,
-		"up":          up,
-		"total":       down + up,
-		"series":      s.seriesByClient(cutoff, now)[name],
-		"categories":  mapToShares(cat),
-		"top_targets": targets,
-		"recent_dns":  s.recentDNSForClient(name, recentCutoff, 12),
-		"recent_tls":  s.recentTLSForClient(name, recentCutoff, 12),
-		"day":         s.clientDayTimeline(name),
+		"name":   name,
+		"since":  d.String(),
+		"down":   down,
+		"up":     up,
+		"total":  down + up,
+		"series": s.seriesByClient(cutoff, now)[name],
+		// First minute the zero-filled series covers, so the client can build a
+		// throughput x-axis from real server timestamps instead of its own clock.
+		"series_start_minute": cutoff.Unix() / 60,
+		"categories":          mapToShares(cat),
+		"top_targets":         targets,
+		"recent_dns":          s.recentDNSForClient(name, recentCutoff, 12),
+		"recent_tls":          s.recentTLSForClient(name, recentCutoff, 12),
+		"day":                 s.clientDayTimeline(name),
 	})
 }
 
