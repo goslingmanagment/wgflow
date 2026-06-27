@@ -20,14 +20,9 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
 	bolt "go.etcd.io/bbolt"
 )
-
-const ethPAll = 0x0003
-const solPacket = 263
-const packetStatistics = 6
 
 type Config struct {
 	Iface         string
@@ -61,6 +56,7 @@ type RuntimeStats struct {
 	LastFlushAt                time.Time `json:"last_flush_at"`
 	CurrentFlowKeys            int       `json:"current_flow_keys"`
 	FlowQueueKeys              int       `json:"flow_queue_keys"`
+	RollupPendingRecords       uint64    `json:"rollup_pending_records"`
 	ConfigPath                 string    `json:"config_path"`
 	ConfigReloads              uint64    `json:"config_reloads"`
 	ConfigLastLoadedAt         time.Time `json:"config_last_loaded_at"`
@@ -93,6 +89,7 @@ type StatsCollector struct {
 	lastDropsDelta     atomic.Uint64
 	lastFlushRecords   atomic.Uint64
 	currentFlowKeys    atomic.Uint64
+	rollupPending      atomic.Uint64
 	configReloads      atomic.Uint64
 	configLastLoadedNS atomic.Int64
 	configLastModNS    atomic.Int64
@@ -254,6 +251,10 @@ func main() {
 		if err := statsCmd(os.Args[2:]); err != nil {
 			log.Fatal(err)
 		}
+	case "web":
+		if err := webCmd(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
 	default:
 		usage()
 		os.Exit(2)
@@ -269,6 +270,7 @@ Usage:
   wgflow report --since 24h [--log-dir /var/log/wgflow]
   wgflow rollup-import --since 24h [--reset]
   wgflow stats [--log-dir /var/log/wgflow] [--json]
+  wgflow web [--listen :8080] [--log-dir /var/log/wgflow] [--rollup /var/lib/wgflow/rollup.db]
 
 `)
 }
@@ -345,6 +347,7 @@ func serve(args []string) error {
 	defer reloadTicker.Stop()
 	statsTicker := time.NewTicker(30 * time.Second)
 	defer statsTicker.Stop()
+	var pendingRollup []FlowRecord
 
 	log.Printf("wgflow capture started iface=%s log_dir=%s rollup=%s flush=%s clients=%d", cfg.Iface, cfg.LogDir, cfg.RollupPath, cfg.FlushInterval, clients.Count())
 
@@ -484,10 +487,16 @@ func serve(args []string) error {
 				records = append(records, rec)
 			}
 			if len(records) > 0 {
-				if err := rollup.Add(records); err != nil {
-					log.Printf("rollup write failed: %v", err)
+				pendingRollup = append(pendingRollup, records...)
+			}
+			if len(pendingRollup) > 0 {
+				if err := rollup.Add(pendingRollup); err != nil {
+					log.Printf("rollup write failed: %v pending_records=%d", err, len(pendingRollup))
+				} else {
+					pendingRollup = nil
 				}
 			}
+			stats.rollupPending.Store(uint64(len(pendingRollup)))
 			stats.flowRecords.Add(uint64(len(records)))
 			stats.lastFlushRecords.Store(uint64(len(records)))
 			stats.currentFlowKeys.Store(0)
@@ -819,12 +828,26 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 		return "apple"
 	case containsAny(t, "telegram", "t.me") || ipPrefix(ip, "149.154.", "91.108.", "91.105."):
 		return "telegram"
+	case containsAny(t, "twitch", "ttvnw.net", "jtvnw.net", "live-video.net"):
+		return "twitch"
+	case containsAny(t, "discord", "discordapp"):
+		return "discord"
 	case containsAny(t, "wildberries"):
 		return "wildberries"
 	case containsAny(t, "fansly", "fbuddy"):
 		return "fansly"
 	case containsAny(t, "one.one.one.one") || ip == "1.1.1.1" || ip == "1.0.0.1":
 		return "dns"
+	case containsAny(t, "cloudflare", "workers.dev", "pages.dev") || ipPrefix(ip,
+		"104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
+		"104.24.", "104.25.", "104.26.", "104.27.", "104.28.", "104.29.", "104.30.", "104.31.",
+		"162.158.", "162.159.", "172.64.", "172.65.", "172.66.", "172.67.", "172.68.", "172.69.",
+		"172.70.", "172.71.", "188.114."):
+		return "cloudflare"
+	case containsAny(t, "cloudfront", "amazonaws", "awsstatic"):
+		return "aws"
+	case containsAny(t, "battle.net", "blizzard", "steam", "steampowered", "steamcontent", "epicgames", "riotgames", "xboxlive", "playstation"):
+		return "games"
 	case port == 6881 || (port >= 6881 && port <= 6999):
 		return "p2p"
 	default:
@@ -868,6 +891,17 @@ func (m *multiFlag) Set(v string) error {
 var rollupBucket = []byte("flow_minute_v1")
 var rollupClientBucket = []byte("flow_client_minute_v1")
 var rollupCategoryBucket = []byte("flow_category_minute_v1")
+var rollupClientCategoryBucket = []byte("flow_client_category_minute_v1")
+
+type RollupClientCategoryTotal struct {
+	Minute          int64
+	Client          string
+	Category        string
+	DownloadBytes   uint64
+	UploadBytes     uint64
+	DownloadPackets uint64
+	UploadPackets   uint64
+}
 
 func OpenRollup(path string) (*RollupStore, error) {
 	return &RollupStore{path: path}, nil
@@ -881,7 +915,7 @@ func (r *RollupStore) Add(records []FlowRecord) error {
 	if r == nil || r.path == "" || len(records) == 0 {
 		return nil
 	}
-	db, err := bolt.Open(r.path, 0644, &bolt.Options{Timeout: 5 * time.Second})
+	db, err := bolt.Open(r.path, 0644, &bolt.Options{Timeout: 30 * time.Second})
 	if err != nil {
 		return err
 	}
@@ -893,6 +927,7 @@ func (r *RollupStore) Add(records []FlowRecord) error {
 		}
 		clientTotals := map[string]*RollupTotal{}
 		categoryTotals := map[string]*RollupTotal{}
+		clientCategoryTotals := map[string]*RollupClientCategoryTotal{}
 		for _, rec := range records {
 			target := rec.Domain
 			if target == "" {
@@ -913,6 +948,7 @@ func (r *RollupStore) Add(records []FlowRecord) error {
 			}
 			addRollupTotal(clientTotals, row.Minute, row.Client, row.DownloadBytes, row.UploadBytes, row.DownloadPackets, row.UploadPackets)
 			addRollupTotal(categoryTotals, row.Minute, row.Category, row.DownloadBytes, row.UploadBytes, row.DownloadPackets, row.UploadPackets)
+			addRollupClientCategoryTotal(clientCategoryTotals, row.Minute, row.Client, row.Category, row.DownloadBytes, row.UploadBytes, row.DownloadPackets, row.UploadPackets)
 			key := rollupKey(row)
 			if old := b.Get(key); old != nil {
 				var existing RollupRow
@@ -937,6 +973,9 @@ func (r *RollupStore) Add(records []FlowRecord) error {
 		if err := putRollupTotals(tx, rollupCategoryBucket, categoryTotals); err != nil {
 			return err
 		}
+		if err := putRollupClientCategoryTotals(tx, clientCategoryTotals); err != nil {
+			return err
+		}
 		return nil
 	})
 }
@@ -949,11 +988,28 @@ func rollupTotalKey(minute int64, name string) []byte {
 	return []byte(fmt.Sprintf("%012d\t%s", minute, name))
 }
 
+func rollupClientCategoryKey(minute int64, client, category string) []byte {
+	return []byte(fmt.Sprintf("%s\t%012d\t%s", client, minute, category))
+}
+
 func addRollupTotal(m map[string]*RollupTotal, minute int64, name string, down, up, downP, upP uint64) {
 	key := fmt.Sprintf("%012d\t%s", minute, name)
 	t := m[key]
 	if t == nil {
 		t = &RollupTotal{Minute: minute, Name: name}
+		m[key] = t
+	}
+	t.DownloadBytes += down
+	t.UploadBytes += up
+	t.DownloadPackets += downP
+	t.UploadPackets += upP
+}
+
+func addRollupClientCategoryTotal(m map[string]*RollupClientCategoryTotal, minute int64, client, category string, down, up, downP, upP uint64) {
+	key := string(rollupClientCategoryKey(minute, client, category))
+	t := m[key]
+	if t == nil {
+		t = &RollupClientCategoryTotal{Minute: minute, Client: client, Category: category}
 		m[key] = t
 	}
 	t.DownloadBytes += down
@@ -980,6 +1036,36 @@ func putRollupTotals(tx *bolt.Tx, bucket []byte, totals map[string]*RollupTotal)
 			t.UploadPackets += existing.UploadPackets
 		}
 		if err := b.Put(key, encodeRollupTotalValue(t)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func putRollupClientCategoryTotals(tx *bolt.Tx, totals map[string]*RollupClientCategoryTotal) error {
+	if len(totals) == 0 {
+		return nil
+	}
+	b, err := tx.CreateBucketIfNotExists(rollupClientCategoryBucket)
+	if err != nil {
+		return err
+	}
+	for _, t := range totals {
+		key := rollupClientCategoryKey(t.Minute, t.Client, t.Category)
+		if old := b.Get(key); len(old) == 32 {
+			existing := decodeRollupTotalValue(old)
+			t.DownloadBytes += existing.DownloadBytes
+			t.UploadBytes += existing.UploadBytes
+			t.DownloadPackets += existing.DownloadPackets
+			t.UploadPackets += existing.UploadPackets
+		}
+		val := &RollupTotal{
+			DownloadBytes:   t.DownloadBytes,
+			UploadBytes:     t.UploadBytes,
+			DownloadPackets: t.DownloadPackets,
+			UploadPackets:   t.UploadPackets,
+		}
+		if err := b.Put(key, encodeRollupTotalValue(val)); err != nil {
 			return err
 		}
 	}
@@ -1184,6 +1270,7 @@ func (s *StatsCollector) Snapshot() RuntimeStats {
 		LastFlushAt:                time.Unix(0, s.lastFlushNS.Load()),
 		CurrentFlowKeys:            flowKeys,
 		FlowQueueKeys:              flowKeys,
+		RollupPendingRecords:       s.rollupPending.Load(),
 		ConfigPath:                 s.configPath,
 		ConfigReloads:              s.configReloads.Load(),
 		ConfigLastLoadedAt:         time.Unix(0, s.configLastLoadedNS.Load()),
@@ -1228,21 +1315,6 @@ func fileSig(path string) (FileSig, error) {
 		return FileSig{}, err
 	}
 	return FileSig{ModTime: st.ModTime(), Size: st.Size()}, nil
-}
-
-type tpacketStats struct {
-	Packets uint32
-	Drops   uint32
-}
-
-func packetSocketStats(fd int) (uint64, uint64, error) {
-	var st tpacketStats
-	l := uint32(unsafe.Sizeof(st))
-	_, _, errno := syscall.Syscall6(syscall.SYS_GETSOCKOPT, uintptr(fd), uintptr(solPacket), uintptr(packetStatistics), uintptr(unsafe.Pointer(&st)), uintptr(unsafe.Pointer(&l)), 0)
-	if errno != 0 {
-		return 0, 0, errno
-	}
-	return uint64(st.Packets), uint64(st.Drops), nil
 }
 
 func NewJSONLogger(path string) (*JSONLogger, error) {
@@ -1380,26 +1452,6 @@ func (c *ClientMap) nameLocked(ip string) string {
 	}
 	return "unknown:" + ip
 }
-
-func openPacketSocket(iface string) (int, error) {
-	ifi, err := net.InterfaceByName(iface)
-	if err != nil {
-		return -1, err
-	}
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_DGRAM, int(htons(ethPAll)))
-	if err != nil {
-		return -1, err
-	}
-	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, 8*1024*1024)
-	sa := &syscall.SockaddrLinklayer{Protocol: htons(ethPAll), Ifindex: ifi.Index}
-	if err := syscall.Bind(fd, sa); err != nil {
-		syscall.Close(fd)
-		return -1, err
-	}
-	return fd, nil
-}
-
-func htons(v uint16) uint16 { return (v << 8) | (v >> 8) }
 
 func parsePacket(b []byte) (packetInfo, bool) {
 	if len(b) < 1 {

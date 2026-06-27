@@ -1,4 +1,7 @@
 wgflow
+webui/node_modules/
+webui/.vite/
+.playwright-cli/
 *.log
 *.jsonl
 *.db
