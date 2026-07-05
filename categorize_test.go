@@ -95,6 +95,63 @@ target_names:
 	}
 }
 
+func TestOrgForIP(t *testing.T) {
+	cases := []struct {
+		ip   string
+		want string
+	}{
+		{"104.29.153.158", "Cloudflare"}, // WARP egress range observed in production
+		{"188.114.97.3", "Cloudflare"},
+		{"2606:4700::6810:84e5", "Cloudflare"},
+		{"157.240.20.35", "Meta"},
+		{"57.144.110.1", "Meta"},
+		{"2a03:2880:f003:c07::2", "Meta"},
+		{"142.250.74.78", "Google"},
+		{"2a00:1450:4010:c0e::5e", "Google"},
+		{"34.120.10.5", "Google Cloud"},
+		{"17.57.146.20", "Apple"},
+		{"13.33.100.1", "Amazon CloudFront"},
+		{"3.171.214.100", "Amazon AWS"},
+		{"23.55.12.1", "Akamai"},
+		{"20.201.28.151", "Microsoft"},
+		{"77.88.55.88", "Yandex"},
+		{"2a02:6b8::2:242", "Yandex"},
+		{"87.240.190.72", "VK"},
+		{"149.154.167.99", "Telegram"},
+		{"91.108.56.130", "Telegram"},
+		{"95.216.1.1", "Hetzner"},
+		{"51.68.1.1", "OVH"},
+		{"8.8.8.8", ""},    // present in DNS lore, absent from the table — must stay honest
+		{"10.66.66.2", ""}, // private space never gets an org
+		{"not-an-ip", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := orgForIP(tc.ip); got != tc.want {
+			t.Errorf("orgForIP(%q) = %q, want %q", tc.ip, got, tc.want)
+		}
+	}
+}
+
+func TestEnrichTargetFallsBackToOrgTable(t *testing.T) {
+	// Non-443 ports skip the PTR path entirely, so these exercise the pure
+	// table fallback without touching the resolver.
+	if resolved, org := enrichTarget("91.108.56.130", "", "tcp", 5222); resolved != "" || org != "Telegram" {
+		t.Errorf("telegram fallback = (%q, %q), want (\"\", \"Telegram\")", resolved, org)
+	}
+	// The org table beats the "unattributed tcp/12324" stopgap when it knows
+	// whose network the tunnel endpoint lives in.
+	if _, org := enrichTarget("95.216.10.20", "", "tcp", 12324); org != "Hetzner" {
+		t.Errorf("tcp/12324 to Hetzner = %q, want Hetzner", org)
+	}
+	if _, org := enrichTarget("198.51.100.99", "", "tcp", 12324); org != "unattributed tcp/12324" {
+		t.Errorf("tcp/12324 to unknown = %q, want the stopgap label", org)
+	}
+	if _, org := enrichTarget("198.51.100.99", "", "udp", 4500); org != "" {
+		t.Errorf("unknown IP must keep an empty org, got %q", org)
+	}
+}
+
 func TestCategorizeCommonInfrastructure(t *testing.T) {
 	cases := []struct {
 		target string

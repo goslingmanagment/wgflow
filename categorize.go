@@ -3,11 +3,113 @@ package main
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
+
+// orgPrefixes maps well-known network prefixes (IPv4+IPv6) to the organization
+// operating them. Accuracy target is "whose backbone is this", not per-service
+// attribution: it names the ~90% of bare-IP traffic (nested tunnels, QUIC
+// without SNI, proxies) that would otherwise render as an anonymous address.
+// Sorted lookup is unnecessary at this size — orgForIP does one linear pass
+// with zero allocations and keeps the most specific (longest) match.
+var orgPrefixes = []struct {
+	prefix netip.Prefix
+	org    string
+}{
+	// Cloudflare (CDN edges + WARP egress ranges seen in production).
+	{netip.MustParsePrefix("104.16.0.0/13"), "Cloudflare"},
+	{netip.MustParsePrefix("104.24.0.0/14"), "Cloudflare"},
+	{netip.MustParsePrefix("104.28.0.0/14"), "Cloudflare"}, // WARP egress (104.28-31)
+	{netip.MustParsePrefix("162.158.0.0/15"), "Cloudflare"},
+	{netip.MustParsePrefix("172.64.0.0/13"), "Cloudflare"},
+	{netip.MustParsePrefix("188.114.96.0/20"), "Cloudflare"},
+	{netip.MustParsePrefix("2606:4700::/32"), "Cloudflare"},
+	// Meta.
+	{netip.MustParsePrefix("31.13.24.0/21"), "Meta"},
+	{netip.MustParsePrefix("31.13.64.0/18"), "Meta"},
+	{netip.MustParsePrefix("57.144.0.0/14"), "Meta"},
+	{netip.MustParsePrefix("157.240.0.0/16"), "Meta"},
+	{netip.MustParsePrefix("179.60.192.0/22"), "Meta"},
+	{netip.MustParsePrefix("2a03:2880::/29"), "Meta"},
+	// Google (consumer edges) and Google Cloud customer ranges, kept apart:
+	// GCP traffic is some tenant's, not Google's own services.
+	{netip.MustParsePrefix("74.125.0.0/16"), "Google"},
+	{netip.MustParsePrefix("142.250.0.0/15"), "Google"},
+	{netip.MustParsePrefix("172.217.0.0/16"), "Google"},
+	{netip.MustParsePrefix("172.253.0.0/16"), "Google"},
+	{netip.MustParsePrefix("216.58.192.0/19"), "Google"},
+	{netip.MustParsePrefix("2a00:1450::/32"), "Google"},
+	{netip.MustParsePrefix("34.64.0.0/10"), "Google Cloud"},
+	{netip.MustParsePrefix("35.184.0.0/13"), "Google Cloud"},
+	// Apple owns 17/8 outright.
+	{netip.MustParsePrefix("17.0.0.0/8"), "Apple"},
+	// Amazon: CloudFront edge ranges first (more specific), then general AWS.
+	{netip.MustParsePrefix("13.32.0.0/15"), "Amazon CloudFront"},
+	{netip.MustParsePrefix("18.64.0.0/14"), "Amazon CloudFront"},
+	{netip.MustParsePrefix("52.84.0.0/15"), "Amazon CloudFront"},
+	{netip.MustParsePrefix("99.86.0.0/16"), "Amazon CloudFront"},
+	{netip.MustParsePrefix("3.0.0.0/9"), "Amazon AWS"},
+	{netip.MustParsePrefix("3.128.0.0/9"), "Amazon AWS"}, // covers the 3.17x CloudFront edges too
+	{netip.MustParsePrefix("18.128.0.0/9"), "Amazon AWS"},
+	// Akamai.
+	{netip.MustParsePrefix("2.16.0.0/13"), "Akamai"},
+	{netip.MustParsePrefix("23.32.0.0/11"), "Akamai"},
+	{netip.MustParsePrefix("104.64.0.0/10"), "Akamai"},
+	// Microsoft (Azure + O365 backbones).
+	{netip.MustParsePrefix("13.64.0.0/11"), "Microsoft"},
+	{netip.MustParsePrefix("20.0.0.0/11"), "Microsoft"},
+	{netip.MustParsePrefix("20.192.0.0/10"), "Microsoft"},
+	{netip.MustParsePrefix("40.74.0.0/15"), "Microsoft"},
+	{netip.MustParsePrefix("52.96.0.0/12"), "Microsoft"},
+	// Yandex.
+	{netip.MustParsePrefix("5.255.192.0/18"), "Yandex"},
+	{netip.MustParsePrefix("37.140.128.0/18"), "Yandex"},
+	{netip.MustParsePrefix("77.88.0.0/18"), "Yandex"},
+	{netip.MustParsePrefix("87.250.224.0/19"), "Yandex"},
+	{netip.MustParsePrefix("93.158.128.0/18"), "Yandex"},
+	{netip.MustParsePrefix("213.180.192.0/19"), "Yandex"},
+	{netip.MustParsePrefix("2a02:6b8::/32"), "Yandex"},
+	// VK.
+	{netip.MustParsePrefix("87.240.128.0/18"), "VK"},
+	{netip.MustParsePrefix("95.142.192.0/20"), "VK"},
+	{netip.MustParsePrefix("2a00:bdc0::/32"), "VK"},
+	// Telegram (moved here from the old enrichTarget string-prefix checks;
+	// 149.154/16 and 91.108/16 are broader than Telegram's exact /20-/22
+	// allocations but backbone-level accuracy is the contract of this table).
+	{netip.MustParsePrefix("91.105.192.0/23"), "Telegram"},
+	{netip.MustParsePrefix("91.108.0.0/16"), "Telegram"},
+	{netip.MustParsePrefix("149.154.160.0/20"), "Telegram"},
+	// Hosting providers commonly seen behind nested tunnels/proxies.
+	{netip.MustParsePrefix("5.9.0.0/16"), "Hetzner"},
+	{netip.MustParsePrefix("88.198.0.0/16"), "Hetzner"},
+	{netip.MustParsePrefix("95.216.0.0/15"), "Hetzner"},
+	{netip.MustParsePrefix("51.68.0.0/14"), "OVH"},
+	{netip.MustParsePrefix("145.239.0.0/16"), "OVH"},
+}
+
+// orgForIP names the organization operating ip's network, or "" when the IP is
+// not in the builtin table. One linear pass over ~50 prefixes, no allocations;
+// the longest (most specific) matching prefix wins.
+func orgForIP(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ""
+	}
+	addr = addr.Unmap()
+	org := ""
+	best := -1
+	for _, e := range orgPrefixes {
+		if e.prefix.Bits() > best && e.prefix.Contains(addr) {
+			best = e.prefix.Bits()
+			org = e.org
+		}
+	}
+	return org
+}
 
 func categorize(target, remoteIP, proto string, port uint16) string {
 	t := strings.ToLower(target)
@@ -143,7 +245,7 @@ func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, 
 	// The configurable table wins over the coded heuristics below so an
 	// operator can correct or extend attribution without a rebuild.
 	if name, ok := lookupTargetName(ip); ok {
-		return name, orgForTargetName(name)
+		return name, orgOrIPFallback(orgForTargetName(name), ip)
 	}
 	switch {
 	case strings.HasPrefix(ip, "37.140.178."):
@@ -156,23 +258,36 @@ func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, 
 		}
 	case strings.HasPrefix(ip, "71.18.251."):
 		return "", "ByteDance/TikTok edge"
-	case ipPrefix(ip, "149.154.", "91.108.", "91.105."):
-		return "", "Telegram network"
 	case ip == "45.140.39.182" || ip == "45.157.182.3" || ip == "64.72.204.203" || ip == "171.22.220.242" || ip == "209.200.248.83":
 		return "", "unattributed infra"
 	}
 	if proto == "tcp" && port == 443 {
 		if name := reverseTargetName(ip); name != "" {
-			return name, orgForTargetName(name)
+			return name, orgOrIPFallback(orgForTargetName(name), ip)
 		}
 		if ipPrefix(ip, "3.171.214.", "3.173.161.", "18.239.36.", "99.86.12.") {
 			return "", "Amazon CloudFront"
 		}
 	}
+	// No PTR and no hand-curated match: fall back to the network-owner table
+	// (Telegram/Cloudflare/Hetzner/...), so nested tunnels and QUIC-without-SNI
+	// at least say whose backbone they talk to.
+	if org := orgForIP(ip); org != "" {
+		return "", org
+	}
 	if proto == "tcp" && port == 12324 {
 		return "", "unattributed tcp/12324"
 	}
 	return "", ""
+}
+
+// orgOrIPFallback keeps a name-derived org when there is one and otherwise
+// falls back to the network-owner table for the IP.
+func orgOrIPFallback(org, ip string) string {
+	if org != "" {
+		return org
+	}
+	return orgForIP(ip)
 }
 
 type reverseDNSResult struct {
@@ -256,7 +371,7 @@ func orgForTargetName(name string) string {
 	case strings.Contains(n, "storage.yandex") || strings.Contains(n, "yandex"):
 		return "Yandex"
 	case strings.Contains(n, "telegram"):
-		return "Telegram network"
+		return "Telegram"
 	case containsAny(n, "bytedance", "tiktok", "capcut", "ibyteimg", "byteimg"):
 		return "ByteDance/TikTok edge"
 	default:
