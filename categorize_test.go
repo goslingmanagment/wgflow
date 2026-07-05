@@ -235,3 +235,63 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 		}
 	}
 }
+
+func TestCategorizePortHeuristics(t *testing.T) {
+	cases := []struct {
+		name   string
+		target string
+		ip     string
+		proto  string
+		port   uint16
+		want   string
+	}{
+		// STUN/TURN -> calls, both protocols, both ports.
+		{"stun udp", "", "203.0.113.10", "udp", 3478, "calls"},
+		{"turn tcp", "", "203.0.113.10", "tcp", 5349, "calls"},
+		// Calls to a big org's bare IP are still calls, not "meta browsing".
+		{"whatsapp stun", "", "157.240.20.35", "udp", 3478, "calls"},
+		// A named STUN host with no domain rule falls through to the port rule.
+		{"named stun", "stun.l.google.com", "", "udp", 3478, "calls"},
+		// APNs.
+		{"apns", "", "17.188.4.20", "tcp", 5223, "apple"},
+		{"udp 5223 is not apns", "", "203.0.113.10", "udp", 5223, "other"},
+		// Encrypted DNS: port 853 beats the owner-range guess (77.88.8.8 is a
+		// Yandex resolver — DoT to it is dns, not "yandex").
+		{"dot", "", "9.9.9.9", "tcp", 853, "dns"},
+		{"doq", "", "94.140.14.14", "udp", 853, "dns"},
+		{"dot to yandex resolver", "", "77.88.8.8", "tcp", 853, "dns"},
+		// Nested tunnels/proxies observed in production.
+		{"socks-ish 1180", "", "203.0.113.10", "tcp", 1180, "proxy"},
+		{"tunnel 12324", "", "203.0.113.10", "tcp", 12324, "proxy"},
+		{"warp masque", "", "203.0.113.10", "udp", 2408, "proxy"},
+		{"l2tp", "", "203.0.113.10", "udp", 1701, "proxy"},
+		{"ipsec nat-t", "", "203.0.113.10", "udp", 4500, "proxy"},
+		{"wg-in-wg", "", "203.0.113.10", "udp", 51820, "proxy"},
+		{"openvpn tcp", "", "203.0.113.10", "tcp", 1194, "proxy"},
+		{"openvpn udp", "", "203.0.113.10", "udp", 1194, "proxy"},
+		// WARP pattern: high UDP ports into Cloudflare space only.
+		{"warp high port", "", "104.29.153.158", "udp", 19310, "proxy"},
+		{"high port elsewhere", "", "8.8.4.4", "udp", 19310, "other"},
+		{"warp port range edge", "", "104.29.0.1", "udp", 19330, "proxy"},
+		{"cloudflare quic stays cloudflare", "", "104.29.153.158", "udp", 443, "cloudflare"},
+		// iCloud Private Relay is a proxy; ordinary iCloud stays apple.
+		{"relay mask", "mask.icloud.com", "", "tcp", 443, "proxy"},
+		{"relay h2", "mask-h2.icloud.com", "", "tcp", 443, "proxy"},
+		{"relay api", "mask-api.icloud.com", "", "udp", 443, "proxy"},
+		{"plain icloud", "gateway.icloud.com", "", "tcp", 443, "apple"},
+		// Domain evidence still wins over port heuristics.
+		{"named dot resolver", "one.one.one.one", "1.1.1.1", "tcp", 853, "dns"},
+		{"p2p unchanged", "", "203.0.113.10", "tcp", 6890, "p2p"},
+	}
+	for _, tc := range cases {
+		if got := categorize(tc.target, tc.ip, tc.proto, tc.port); got != tc.want {
+			t.Errorf("%s: categorize(%q, %q, %s, %d) = %q, want %q", tc.name, tc.target, tc.ip, tc.proto, tc.port, got, tc.want)
+		}
+	}
+	if org := orgForTargetName("mask-api.icloud.com"); org != "iCloud Private Relay" {
+		t.Errorf("orgForTargetName(mask-api) = %q, want iCloud Private Relay", org)
+	}
+	if org := orgForTargetName("mask.icloud.com"); org != "iCloud Private Relay" {
+		t.Errorf("orgForTargetName(mask) = %q, want iCloud Private Relay", org)
+	}
+}

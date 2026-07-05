@@ -149,7 +149,20 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 		ip = t
 		t = ""
 	}
+	// A bare IP carries no domain evidence, so the honest port heuristics
+	// (STUN, DoT, nested tunnels) outrank the "whose address range is this"
+	// guesses in the switch below: WARP to a Cloudflare IP is a proxy, DoT to
+	// a Yandex resolver is DNS — not "cloudflare"/"yandex" browsing.
+	if t == "" {
+		if cat := categorizeByPort(proto, port, ip); cat != "" {
+			return cat
+		}
+	}
 	switch {
+	// Before the apple case: mask*.icloud.com is iCloud Private Relay — a
+	// proxy tunnel, not regular Apple service chatter.
+	case isPrivateRelayName(t):
+		return "proxy"
 	case containsAny(t, "instagram", "fbcdn", "facebook", "whatsapp", "meta.com") || ipPrefix(ip, "57.144.", "157.240.", "31.13.", "163.70."):
 		return "meta"
 	case containsAny(t, "youtube", "googlevideo", "ytimg", "googleapis", "googleusercontent") || ipPrefix(ip, "142.250.", "142.251.", "172.217.", "173.194.", "74.125.", "216.239."):
@@ -195,8 +208,60 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 	case port == 6881 || (port >= 6881 && port <= 6999):
 		return "p2p"
 	default:
+		// Named target that matched no domain rule: the port heuristics get the
+		// last word before "other" (e.g. stun.example.org:3478 -> calls).
+		if cat := categorizeByPort(proto, port, ip); cat != "" {
+			return cat
+		}
 		return "other"
 	}
+}
+
+// isPrivateRelayName spots iCloud Private Relay SNIs (mask.icloud.com,
+// mask-h2.icloud.com, mask-api.icloud.com).
+func isPrivateRelayName(t string) bool {
+	return (strings.HasPrefix(t, "mask.") || strings.HasPrefix(t, "mask-")) && strings.HasSuffix(t, ".icloud.com")
+}
+
+// categorizeByPort names traffic by well-known port when no domain rule fired.
+// These are the honest labels for the "other ports" bucket observed in
+// production: nested tunnels/proxies, STUN calls, APNs, encrypted DNS.
+func categorizeByPort(proto string, port uint16, ip string) string {
+	switch port {
+	case 3478, 5349:
+		return "calls" // STUN/TURN — voice/video call setup and media relay
+	case 853:
+		return "dns" // DNS over TLS/QUIC
+	case 5223:
+		if proto == "tcp" {
+			return "apple" // Apple Push Notification service
+		}
+	case 1194:
+		return "proxy" // OpenVPN (tcp and udp)
+	}
+	switch proto {
+	case "tcp":
+		switch port {
+		case 1180, 12324: // nested SOCKS/VPN tunnels observed in production
+			return "proxy"
+		}
+	case "udp":
+		switch port {
+		case 2408: // Cloudflare WARP MASQUE
+			return "proxy"
+		case 1701, 4500: // L2TP, IPsec NAT-T
+			return "proxy"
+		case 51820: // WireGuard-in-WireGuard
+			return "proxy"
+		}
+		// Observed WARP pattern: high UDP ports 19300-19330 into Cloudflare
+		// address space. The builtin table only — never the ASN DB — keeps
+		// this safe on the capture hot path.
+		if port >= 19300 && port <= 19330 && orgForIP(ip) == "Cloudflare" {
+			return "proxy"
+		}
+	}
+	return ""
 }
 
 // builtinTargetNames is the default IP -> display-hostname table used by
@@ -397,6 +462,8 @@ func reverseTargetName(ip string) string {
 func orgForTargetName(name string) string {
 	n := strings.ToLower(name)
 	switch {
+	case isPrivateRelayName(n):
+		return "iCloud Private Relay"
 	case strings.Contains(n, "cloudfront"):
 		return "Amazon CloudFront"
 	case strings.Contains(n, "storage.yandex") || strings.Contains(n, "yandex"):
