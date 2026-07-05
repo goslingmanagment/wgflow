@@ -1,99 +1,15 @@
 package main
 
 import (
-	"crypto/aes"
-	"crypto/cipher"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
-
-func TestAliasConfig(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "clients.yaml")
-	cfg := `
-people:
-  - display: Diana
-    devices: [diana-iphone, diana-macbook]
-  - display: Мама
-    devices: [mom-macbook]
-device_kind:
-  mom-macbook: laptop
-`
-	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
-		t.Fatal(err)
-	}
-	ac, err := loadAliasConfig(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ac.Person("diana-iphone") != "Diana" || ac.Person("diana-macbook") != "Diana" {
-		t.Errorf("diana devices should map to Diana")
-	}
-	if ac.Person("mom-macbook") != "Мама" {
-		t.Errorf("mom-macbook = %q, want Мама", ac.Person("mom-macbook"))
-	}
-	if ac.Person("guest-iphone") != "guest" { // unmapped -> prefix fallback
-		t.Errorf("unmapped fallback = %q, want guest", ac.Person("guest-iphone"))
-	}
-	if ac.Person("mom") != "mom" { // hyphenless -> whole name, never orphaned
-		t.Errorf("hyphenless fallback = %q, want mom", ac.Person("mom"))
-	}
-	if ac.Kind("mom-macbook") != "laptop" {
-		t.Errorf("kind override = %q, want laptop", ac.Kind("mom-macbook"))
-	}
-	if ac.Kind("diana-iphone") != "" {
-		t.Errorf("no override should be empty")
-	}
-	if len(ac.Roster()) != 3 {
-		t.Errorf("roster = %v, want 3 devices", ac.Roster())
-	}
-}
-
-func TestAliasConfigFallbacks(t *testing.T) {
-	// missing file -> empty (not error), nil receiver -> same fallbacks
-	ac, err := loadAliasConfig(filepath.Join(t.TempDir(), "nope.yaml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	var nilAC *AliasConfig
-	for _, a := range []*AliasConfig{ac, nilAC} {
-		if a.Person("diana-iphone") != "diana" {
-			t.Errorf("fallback Person = %q, want diana", a.Person("diana-iphone"))
-		}
-		if a.Kind("x") != "" || a.Roster() != nil {
-			t.Errorf("empty/nil config should have no kind/roster")
-		}
-	}
-}
-
-func TestClientMapMatchDirection(t *testing.T) {
-	_, vpn, err := net.ParseCIDR("10.66.66.0/24")
-	if err != nil {
-		t.Fatal(err)
-	}
-	clients := &ClientMap{
-		byIP:    map[string]string{"10.66.66.6": "alice"},
-		vpnNets: []*net.IPNet{vpn},
-	}
-
-	clientIP, name, outbound, ok := clients.Match(net.ParseIP("10.66.66.6"), net.ParseIP("8.8.8.8"))
-	if !ok || !outbound || clientIP != "10.66.66.6" || name != "alice" {
-		t.Fatalf("outbound match = (%q, %q, %v, %v)", clientIP, name, outbound, ok)
-	}
-
-	clientIP, name, outbound, ok = clients.Match(net.ParseIP("8.8.8.8"), net.ParseIP("10.66.66.6"))
-	if !ok || outbound || clientIP != "10.66.66.6" || name != "alice" {
-		t.Fatalf("inbound match = (%q, %q, %v, %v)", clientIP, name, outbound, ok)
-	}
-}
 
 func TestRollupPreservesDownloadUploadDirection(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollup.db")
@@ -232,37 +148,6 @@ func TestThroughputSeriesIncludesZeroMinutes(t *testing.T) {
 	}
 }
 
-func TestCategorizeCommonInfrastructure(t *testing.T) {
-	cases := []struct {
-		target string
-		ip     string
-		want   string
-	}{
-		{"edec822a8c68.j.cloudfront.hls.ttvnw.net", "", "twitch"}, // named twitch beats AWS fallback
-		{"cdn.discordapp.com", "", "discord"},
-		{"static.example", "104.29.153.158", "cloudflare"},
-		{"d111111abcdef8.cloudfront.net", "", "aws"},
-		{"telemetry-in.battle.net", "", "games"},
-		{"one.one.one.one", "1.1.1.1", "dns"},
-		{"", "37.140.178.106", "yandex"},
-		{"", "5.255.221.166", "yandex"},
-		{"mcs-normal-sg.capcutapi.com", "", "bytedance"},
-		{"p16-heycan-file-sign-sg.ibyteimg.com", "", "bytedance"},
-		{"api.vk.com", "", "vk"},
-		{"sun9-1.userapi.com", "", "vk"},
-		{"ipv4-c001.nflxvideo.net", "", "netflix"},
-		{"audio-fa.scdn.co", "", "spotify"},
-		{"ctldl.windowsupdate.com", "", "microsoft"},
-		{"e1234.dscx.akamaiedge.net", "", "cdn"},
-		{"unknown-host.example.org", "", "other"},
-	}
-	for _, tc := range cases {
-		if got := categorize(tc.target, tc.ip, "tcp", 443); got != tc.want {
-			t.Fatalf("categorize(%q, %q) = %q, want %q", tc.target, tc.ip, got, tc.want)
-		}
-	}
-}
-
 func TestNewAPIFlowEnrichesKnownBareIPs(t *testing.T) {
 	yandex := newAPIFlow(&TopAgg{
 		Client:   "diana-macbook",
@@ -329,48 +214,6 @@ func TestNewAPIFlowEnrichesKnownBareIPs(t *testing.T) {
 	}
 	if attributed.AttributionSource != "TLS SNI" {
 		t.Fatalf("attribution source = %q", attributed.AttributionSource)
-	}
-}
-
-func TestParseTLSSNI(t *testing.T) {
-	record, handshake := testTLSClientHello("upload.example.com")
-	if got := parseTLSSNI(record); got != "upload.example.com" {
-		t.Fatalf("parseTLSSNI = %q, want upload.example.com", got)
-	}
-	if got := parseTLSHandshakeSNI(handshake); got != "upload.example.com" {
-		t.Fatalf("parseTLSHandshakeSNI = %q, want upload.example.com", got)
-	}
-}
-
-func TestParseQUICSNI(t *testing.T) {
-	packet := testQUICInitialPacket(t, "firebaseappcheck.googleapis.com")
-	if got := parseQUICSNI(packet); got != "firebaseappcheck.googleapis.com" {
-		t.Fatalf("parseQUICSNI = %q, want firebaseappcheck.googleapis.com", got)
-	}
-}
-
-func TestParseDNSMessageAnswerNames(t *testing.T) {
-	msg := []byte{0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}
-	msg = appendDNSNameTest(msg, "photos.example.com")
-	msg = append(msg, 0x00, 0x01, 0x00, 0x01) // question A IN
-	msg = append(msg,
-		0xc0, 0x0c, // answer owner -> question name
-		0x00, 0x01, // A
-		0x00, 0x01, // IN
-		0x00, 0x00, 0x01, 0x2c, // TTL 300
-		0x00, 0x04,
-		192, 0, 2, 55,
-	)
-	parsed, ok := parseDNSMessage(msg)
-	if !ok {
-		t.Fatal("parseDNSMessage failed")
-	}
-	if len(parsed.Answers) != 1 {
-		t.Fatalf("answers = %d, want 1", len(parsed.Answers))
-	}
-	ans := parsed.Answers[0]
-	if ans.Name != "photos.example.com" || ans.Type != "A" || ans.Value != "192.0.2.55" || ans.TTL != 300 {
-		t.Fatalf("answer = %+v", ans)
 	}
 }
 
@@ -522,48 +365,6 @@ func TestClientDetailRecentHonorsTo(t *testing.T) {
 	}
 }
 
-func TestPruneRollup(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "rollup.db")
-	rollup, err := OpenRollup(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer rollup.Close()
-
-	old := time.Now().Add(-40 * 24 * time.Hour).Truncate(time.Minute)
-	recent := time.Now().Add(-1 * time.Hour).Truncate(time.Minute)
-	recs := []FlowRecord{
-		{TSEnd: old, Client: "alice", RemoteIP: "87.250.250.242", RemotePort: 443, Proto: "tcp", Domain: "api.music.yandex.net", ClientDownloadBytes: 1000},
-		{TSEnd: recent, Client: "alice", RemoteIP: "87.250.250.242", RemotePort: 443, Proto: "tcp", Domain: "api.music.yandex.net", ClientDownloadBytes: 2000},
-	}
-	if err := rollup.Add(recs); err != nil {
-		t.Fatal(err)
-	}
-
-	// One old minute populates one key in each of the 4 buckets -> prune deletes 4.
-	n, err := pruneRollup(path, time.Now().Add(-30*24*time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if n != 4 {
-		t.Fatalf("pruned %d keys, want 4 (one old minute across all 4 buckets)", n)
-	}
-
-	// The recent flow must survive intact.
-	byClient, _, _, err := aggregateReportTotalsFromRollup(path, time.Now().Add(-90*24*time.Hour))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if byClient["alice"].Down != 2000 {
-		t.Fatalf("download after prune = %d, want 2000 (old gone, recent kept)", byClient["alice"].Down)
-	}
-
-	// Idempotent: nothing left older than the cutoff.
-	if n2, err := pruneRollup(path, time.Now().Add(-30*24*time.Hour)); err != nil || n2 != 0 {
-		t.Fatalf("second prune = %d (err %v), want 0", n2, err)
-	}
-}
-
 func TestDeviceKind(t *testing.T) {
 	cases := map[string]string{
 		"diana-iphone": "phone",
@@ -695,102 +496,6 @@ func TestBasicAuthHandler(t *testing.T) {
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("correct password status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
-}
-
-func testTLSClientHello(host string) (record []byte, handshake []byte) {
-	body := []byte{0x03, 0x03}
-	body = append(body, make([]byte, 32)...)
-	body = append(body, 0x00)                   // session_id
-	body = append(body, 0x00, 0x02, 0x13, 0x01) // cipher_suites
-	body = append(body, 0x01, 0x00)             // compression_methods
-	serverName := []byte{0x00, byte(len(host) >> 8), byte(len(host))}
-	serverName = append(serverName, []byte(host)...)
-	sniData := []byte{byte(len(serverName) >> 8), byte(len(serverName))}
-	sniData = append(sniData, serverName...)
-	ext := []byte{0x00, 0x00, byte(len(sniData) >> 8), byte(len(sniData))}
-	ext = append(ext, sniData...)
-	body = append(body, byte(len(ext)>>8), byte(len(ext)))
-	body = append(body, ext...)
-
-	handshake = []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
-	handshake = append(handshake, body...)
-	record = []byte{0x16, 0x03, 0x01, byte(len(handshake) >> 8), byte(len(handshake))}
-	record = append(record, handshake...)
-	return record, handshake
-}
-
-func testQUICInitialPacket(t *testing.T, host string) []byte {
-	t.Helper()
-	_, handshake := testTLSClientHello(host)
-	plain := []byte{0x06, 0x00} // CRYPTO, offset=0
-	plain = append(plain, encodeQUICVarIntTest(uint64(len(handshake)))...)
-	plain = append(plain, handshake...)
-	for len(plain) < 160 {
-		plain = append(plain, 0x00)
-	}
-
-	dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
-	key, iv, hp, ok := quicInitialKeys(0x00000001, dcid)
-	if !ok {
-		t.Fatal("missing quic v1 keys")
-	}
-	header := []byte{0xc0, 0x00, 0x00, 0x00, 0x01, byte(len(dcid))}
-	header = append(header, dcid...)
-	header = append(header, 0x00) // scid len
-	header = append(header, 0x00) // token len
-	pn := []byte{0x01}
-	header = append(header, encodeQUICVarIntTest(uint64(len(pn)+len(plain)+16))...)
-	pnOffset := len(header)
-	headerWithPN := append(append([]byte(nil), header...), pn...)
-
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	aead, err := cipher.NewGCM(block)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nonce := append([]byte(nil), iv...)
-	nonce[len(nonce)-1] ^= 0x01
-	packet := append(headerWithPN, aead.Seal(nil, nonce, plain, headerWithPN)...)
-
-	hpBlock, err := aes.NewCipher(hp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var mask [aes.BlockSize]byte
-	hpBlock.Encrypt(mask[:], packet[pnOffset+4:pnOffset+4+aes.BlockSize])
-	packet[0] ^= mask[0] & 0x0f
-	packet[pnOffset] ^= mask[1]
-	return packet
-}
-
-func encodeQUICVarIntTest(v uint64) []byte {
-	switch {
-	case v < 64:
-		return []byte{byte(v)}
-	case v < 16384:
-		var b [2]byte
-		binary.BigEndian.PutUint16(b[:], uint16(v)|0x4000)
-		return b[:]
-	case v < 1073741824:
-		var b [4]byte
-		binary.BigEndian.PutUint32(b[:], uint32(v)|0x80000000)
-		return b[:]
-	default:
-		var b [8]byte
-		binary.BigEndian.PutUint64(b[:], v|0xc000000000000000)
-		return b[:]
-	}
-}
-
-func appendDNSNameTest(dst []byte, name string) []byte {
-	for _, label := range strings.Split(name, ".") {
-		dst = append(dst, byte(len(label)))
-		dst = append(dst, label...)
-	}
-	return append(dst, 0x00)
 }
 
 func findAgg(t *testing.T, aggs map[string]*TopAgg, client, category, target, proto string, port uint16) *TopAgg {

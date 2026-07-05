@@ -77,3 +77,36 @@ func TestParseDNSNameSanitizesControlBytes(t *testing.T) {
 		t.Fatalf("query still contains control bytes: %q", parsed.Query)
 	}
 }
+
+func TestParseDNSMessageAnswerNames(t *testing.T) {
+	msg := []byte{0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}
+	msg = appendDNSNameTest(msg, "photos.example.com")
+	msg = append(msg, 0x00, 0x01, 0x00, 0x01) // question A IN
+	msg = append(msg,
+		0xc0, 0x0c, // answer owner -> question name
+		0x00, 0x01, // A
+		0x00, 0x01, // IN
+		0x00, 0x00, 0x01, 0x2c, // TTL 300
+		0x00, 0x04,
+		192, 0, 2, 55,
+	)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok {
+		t.Fatal("parseDNSMessage failed")
+	}
+	if len(parsed.Answers) != 1 {
+		t.Fatalf("answers = %d, want 1", len(parsed.Answers))
+	}
+	ans := parsed.Answers[0]
+	if ans.Name != "photos.example.com" || ans.Type != "A" || ans.Value != "192.0.2.55" || ans.TTL != 300 {
+		t.Fatalf("answer = %+v", ans)
+	}
+}
+
+func appendDNSNameTest(dst []byte, name string) []byte {
+	for _, label := range strings.Split(name, ".") {
+		dst = append(dst, byte(len(label)))
+		dst = append(dst, label...)
+	}
+	return append(dst, 0x00)
+}

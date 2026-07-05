@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"net"
 	"testing"
 	"time"
 )
@@ -104,5 +105,26 @@ func TestDomainCacheEvictsExpiredFirst(t *testing.T) {
 	defer d.mu.RUnlock()
 	if _, ok := d.byIP["1.1.1.1"]; ok {
 		t.Fatal("expired byIP entry survived eviction")
+	}
+}
+
+func TestClientMapMatchDirection(t *testing.T) {
+	_, vpn, err := net.ParseCIDR("10.66.66.0/24")
+	if err != nil {
+		t.Fatal(err)
+	}
+	clients := &ClientMap{
+		byIP:    map[string]string{"10.66.66.6": "alice"},
+		vpnNets: []*net.IPNet{vpn},
+	}
+
+	clientIP, name, outbound, ok := clients.Match(net.ParseIP("10.66.66.6"), net.ParseIP("8.8.8.8"))
+	if !ok || !outbound || clientIP != "10.66.66.6" || name != "alice" {
+		t.Fatalf("outbound match = (%q, %q, %v, %v)", clientIP, name, outbound, ok)
+	}
+
+	clientIP, name, outbound, ok = clients.Match(net.ParseIP("8.8.8.8"), net.ParseIP("10.66.66.6"))
+	if !ok || outbound || clientIP != "10.66.66.6" || name != "alice" {
+		t.Fatalf("inbound match = (%q, %q, %v, %v)", clientIP, name, outbound, ok)
 	}
 }
