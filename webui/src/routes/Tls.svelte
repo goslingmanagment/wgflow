@@ -45,7 +45,8 @@
         <div class="rec">
           <span class="c mono">{r.client}</span>
           <span class="a">→ {r.server_name}</span>
-          <span class="proto mono" class:quic={r.protocol === 'quic'}>{(r.protocol || 'tls').toUpperCase()}</span>
+          <!-- protocol is tls | quic | http (plain HTTP Host from port 80) -->
+          <span class="proto mono" class:quic={r.protocol === 'quic'} class:http={r.protocol === 'http'}>{(r.protocol || 'tls').toUpperCase()}</span>
           <span class="tm mono">{ago(r.ts)}</span>
         </div>
       {/each}
@@ -81,6 +82,8 @@
   .rec .a { color: var(--color-coral); }
   .proto { flex: 0 0 auto; color: var(--color-muted); background: var(--color-s3); border-radius: 4px; padding: 1px 5px; font-size: 10px; }
   .proto.quic { color: var(--color-accent); background: var(--color-accent-dim); }
+  /* plain HTTP: unencrypted — warn tint so it never reads as a locked session */
+  .proto.http { color: var(--color-warn); background: color-mix(in srgb, var(--color-warn) 15%, transparent); }
   .rec .tm { margin-left: auto; color: var(--color-muted); font-size: 11px; }
   .dim { color: var(--color-muted); }
   .err { color: var(--color-danger); }

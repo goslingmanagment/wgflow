@@ -116,6 +116,9 @@
   <div class="who">
     <h1 class="serif">{data.name}</h1>
     <VerdictBadge verdict={data.verdict} loggerOk={data.logger_ok} />
+    {#if data.encrypted_dns}
+      <InfoTip text="Клиент использует шифрованный DNS (DoH/DoT) — DNS-журнал неполон, атрибуция доменов может занижаться."><span class="edns">DoH/DoT</span></InfoTip>
+    {/if}
   </div>
   {#if data.verdict}
     <div class="trace">{#if deviceGlyph(data.device_kind)}<span class="dev" title={data.device_kind}>{deviceGlyph(data.device_kind)}</span> {/if}{traceLine(data.verdict)}</div>
@@ -174,10 +177,12 @@
     <div class="card">
       <div class="ch"><h3 class="serif">Recent sites</h3><span class="hint">TLS/QUIC · МСК</span></div>
       {#each recentTls.slice(0, 6) as r}
+        <!-- protocol is tls | quic | http (plain HTTP Host from port 80: seen,
+             not encrypted — no lock icon for it) -->
         <div class="li">
-          <Icon name={r.protocol === 'quic' ? 'activity' : 'lock'} size={13} />
+          <Icon name={r.protocol === 'quic' ? 'activity' : r.protocol === 'http' ? 'dns' : 'lock'} size={13} />
           <span class="g">{r.server_name}</span>
-          <span class="proto mono" class:quic={r.protocol === 'quic'}>{(r.protocol || 'tls').toUpperCase()}</span>
+          <span class="proto mono" class:quic={r.protocol === 'quic'} class:http={r.protocol === 'http'}>{(r.protocol || 'tls').toUpperCase()}</span>
           <span class="ago mono">{hhmmMSK(r.ts)}</span>
         </div>
       {/each}
@@ -217,6 +222,18 @@
     align-items: center;
     gap: 12px;
     margin-bottom: 6px;
+  }
+  /* DoH/DoT chip: same pill idiom as VerdictBadge, tinted with the dns cyan.
+     It marks "the DNS log is incomplete for this client", not a verdict. */
+  .edns {
+    display: inline-flex;
+    align-items: center;
+    font-size: 11px;
+    padding: 2px 9px;
+    border-radius: 999px;
+    color: #56b6c2;
+    background: color-mix(in srgb, #56b6c2 14%, transparent);
+    white-space: nowrap;
   }
   .trace {
     color: var(--color-muted);
@@ -470,6 +487,11 @@
   .proto.quic {
     color: var(--color-accent);
     background: var(--color-accent-dim);
+  }
+  /* plain HTTP: unencrypted — warn tint, never the lock's neutral look */
+  .proto.http {
+    color: var(--color-warn);
+    background: color-mix(in srgb, var(--color-warn) 15%, transparent);
   }
   .nx {
     color: var(--color-warn);

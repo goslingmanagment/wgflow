@@ -168,7 +168,13 @@ export const CAT_COLORS = {
   discord: '#5865f2',
   games: '#e3b341',
   p2p: '#3fb950',
-  dns: '#d29922',
+  // calls: warm accent for STUN/TURN voice/video traffic.
+  calls: '#f4845f',
+  // proxy: neutral grey with a violet tint — nested tunnels, WARP, Private
+  // Relay; deliberately unglamorous, it means "we can only name the wrapper".
+  proxy: '#8d86a5',
+  // dns: muted cyan (was amber, which collided with the warn color).
+  dns: '#56b6c2',
   wildberries: '#d4537e',
   fansly: '#f85149',
   vk: '#4a76a8',

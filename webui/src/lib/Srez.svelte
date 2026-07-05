@@ -115,7 +115,9 @@
     for (const { person, devices, total } of people) {
       devices.sort((a, b) => b.total - a.total)
       out.push(`${person} · ${statusWord(aggVerdict(devices), snap.logger_ok)} · ${fmtBytes(total)}`)
-      for (const c of devices) out.push(`  ${deviceLabel(c.name)}  ${fmtBytes(c.total)} · ${deviceDoing(c, snap.logger_ok)}`)
+      // "(шифрованный DNS)" travels inside the copied text: the reader must
+      // know the domain list for that device is incomplete, not exhaustive.
+      for (const c of devices) out.push(`  ${deviceLabel(c.name)}  ${fmtBytes(c.total)} · ${deviceDoing(c, snap.logger_ok)}${c.encrypted_dns ? ' (шифрованный DNS)' : ''}`)
       out.push(`  Вывод: ${personConclusion(devices, snap.logger_ok)}`)
       out.push('─'.repeat(44))
     }

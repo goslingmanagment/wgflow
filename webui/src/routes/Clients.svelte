@@ -9,7 +9,10 @@
   import HealthPill from '../lib/HealthPill.svelte'
   import StaleBanner from '../lib/StaleBanner.svelte'
   import VerdictBadge from '../lib/VerdictBadge.svelte'
+  import InfoTip from '../lib/InfoTip.svelte'
   import Srez from '../lib/Srez.svelte'
+
+  const EDNS_TIP = 'Клиент использует шифрованный DNS (DoH/DoT) — DNS-журнал неполон, атрибуция доменов может занижаться.'
 
   let search = $state('')
   let sort = $state('total')
@@ -110,7 +113,8 @@
       <div class="nm">
         <span class="dot" style="background:{verdictColor(c.verdict?.status)}"></span>
         <div class="tx">
-          <div class="name">{#if deviceGlyph(c.device_kind)}<span class="dev" title={c.device_kind}>{deviceGlyph(c.device_kind)}</span>{/if}{c.name} <VerdictBadge verdict={c.verdict} loggerOk={data.logger_ok} compact /></div>
+          <div class="name">{#if deviceGlyph(c.device_kind)}<span class="dev" title={c.device_kind}>{deviceGlyph(c.device_kind)}</span>{/if}{c.name} <VerdictBadge verdict={c.verdict} loggerOk={data.logger_ok} compact />{#if c.encrypted_dns}
+              <InfoTip text={EDNS_TIP}><span class="edns">DoH/DoT</span></InfoTip>{/if}</div>
           <div class="site">
             {#if c.current_site}<span class="cd" style="background:{catColor(c.top_category)}"></span>→ {c.current_site}{:else}<span class="muted">— {c.top_category || ''}</span>{/if}
           </div>
@@ -261,6 +265,19 @@
   .dev {
     margin-right: 5px;
     font-size: 12px;
+  }
+  /* DoH/DoT chip: same pill idiom as VerdictBadge, tinted with the dns cyan.
+     It marks "the DNS log is incomplete for this client", not a verdict. */
+  .edns {
+    display: inline-flex;
+    align-items: center;
+    font-size: 10px;
+    padding: 1px 8px;
+    border-radius: 999px;
+    margin-left: 4px;
+    color: #56b6c2;
+    background: color-mix(in srgb, #56b6c2 14%, transparent);
+    white-space: nowrap;
   }
   .ledger {
     background: var(--color-s1);
