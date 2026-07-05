@@ -19,7 +19,16 @@ func TestRollupPreservesDownloadUploadDirection(t *testing.T) {
 	}
 	defer rollup.Close()
 
-	base := time.Now().Add(-time.Hour).Truncate(time.Minute)
+	// An hour back, but never before today's MSK midnight: clientDayTimeline is
+	// midnight-anchored, so just after midnight a "yesterday 23:xx" record would
+	// legitimately be absent and the day-timeline assertion below would flake.
+	base := time.Now().Add(-time.Hour)
+	nowMSK := time.Now().In(mskLocation)
+	midnight := time.Date(nowMSK.Year(), nowMSK.Month(), nowMSK.Day(), 0, 0, 0, 0, mskLocation)
+	if base.Before(midnight) {
+		base = time.Now().Add(-2 * time.Minute)
+	}
+	base = base.Truncate(time.Minute)
 	records := []FlowRecord{
 		{
 			TSEnd: base, Client: "alice", ClientIP: "10.66.66.6",

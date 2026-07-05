@@ -189,17 +189,50 @@ var reverseDNSCache = struct {
 	m map[string]reverseDNSResult
 }{m: map[string]reverseDNSResult{}}
 
-func reverseTargetName(ip string) string {
+// reverseDNSLookup returns the cached PTR result for ip, expired or not — the
+// caller decides whether a stale entry is still usable (stale-while-revalidate
+// in the web layer) or must be refreshed.
+func reverseDNSLookup(ip string) (reverseDNSResult, bool) {
+	reverseDNSCache.Lock()
+	r, ok := reverseDNSCache.m[ip]
+	reverseDNSCache.Unlock()
+	return r, ok
+}
+
+// reverseDNSStore inserts a result, enforcing the cap when adding a new key.
+// Expired entries go first; if the cache is full of live entries drop
+// arbitrary ones — a re-lookup is cheap next time the IP shows up.
+func reverseDNSStore(ip string, r reverseDNSResult) {
 	now := time.Now()
 	reverseDNSCache.Lock()
-	if r, ok := reverseDNSCache.m[ip]; ok {
-		if now.Before(r.expiresAt) {
-			reverseDNSCache.Unlock()
-			return r.name
+	if _, exists := reverseDNSCache.m[ip]; !exists && len(reverseDNSCache.m) >= reverseDNSCacheMax {
+		for k, old := range reverseDNSCache.m {
+			if !now.Before(old.expiresAt) {
+				delete(reverseDNSCache.m, k)
+			}
 		}
-		delete(reverseDNSCache.m, ip)
+		for k := range reverseDNSCache.m {
+			if len(reverseDNSCache.m) < reverseDNSCacheMax {
+				break
+			}
+			delete(reverseDNSCache.m, k)
+		}
 	}
+	reverseDNSCache.m[ip] = r
 	reverseDNSCache.Unlock()
+}
+
+func reverseDNSDelete(ip string) {
+	reverseDNSCache.Lock()
+	delete(reverseDNSCache.m, ip)
+	reverseDNSCache.Unlock()
+}
+
+func reverseTargetName(ip string) string {
+	now := time.Now()
+	if r, ok := reverseDNSLookup(ip); ok && now.Before(r.expiresAt) {
+		return r.name
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 	names, err := net.DefaultResolver.LookupAddr(ctx, ip)
@@ -211,24 +244,7 @@ func reverseTargetName(ip string) string {
 	if name != "" {
 		ttl = 12 * time.Hour
 	}
-	reverseDNSCache.Lock()
-	if len(reverseDNSCache.m) >= reverseDNSCacheMax {
-		// Expired entries go first; if the cache is full of live entries drop
-		// arbitrary ones — a re-lookup is cheap next time the IP shows up.
-		for k, r := range reverseDNSCache.m {
-			if !now.Before(r.expiresAt) {
-				delete(reverseDNSCache.m, k)
-			}
-		}
-		for k := range reverseDNSCache.m {
-			if len(reverseDNSCache.m) < reverseDNSCacheMax {
-				break
-			}
-			delete(reverseDNSCache.m, k)
-		}
-	}
-	reverseDNSCache.m[ip] = reverseDNSResult{name: name, expiresAt: now.Add(ttl)}
-	reverseDNSCache.Unlock()
+	reverseDNSStore(ip, reverseDNSResult{name: name, expiresAt: now.Add(ttl)})
 	return name
 }
 

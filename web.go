@@ -582,7 +582,7 @@ func reverseDNSWarmWorker() {
 	for ip := range reverseDNSWarmCh {
 		// Delete the placeholder so reverseTargetName performs the real lookup
 		// and stores the result with its normal positive/negative TTL.
-		reverseDNSCache.Delete(ip)
+		reverseDNSDelete(ip)
 		reverseTargetName(ip)
 		reverseDNSWarmMu.Lock()
 		delete(reverseDNSWarmInFlight, ip)
@@ -603,11 +603,11 @@ func enrichTargetNonBlocking(target, remoteIP, proto string, port uint16) (resol
 	}
 	// Mirror the only condition under which enrichTarget consults reverse DNS.
 	if net.ParseIP(ip) != nil && proto == "tcp" && port == 443 {
-		if v, ok := reverseDNSCache.Load(ip); !ok {
-			reverseDNSCache.Store(ip, reverseDNSResult{expiresAt: time.Now().Add(reverseDNSWarmGrace)})
+		if r, ok := reverseDNSLookup(ip); !ok {
+			reverseDNSStore(ip, reverseDNSResult{expiresAt: time.Now().Add(reverseDNSWarmGrace)})
 			queueReverseDNSWarm(ip)
-		} else if r, isRes := v.(reverseDNSResult); isRes && !time.Now().Before(r.expiresAt) {
-			reverseDNSCache.Store(ip, reverseDNSResult{name: r.name, expiresAt: time.Now().Add(reverseDNSWarmGrace)})
+		} else if !time.Now().Before(r.expiresAt) {
+			reverseDNSStore(ip, reverseDNSResult{name: r.name, expiresAt: time.Now().Add(reverseDNSWarmGrace)})
 			queueReverseDNSWarm(ip)
 		}
 	}
