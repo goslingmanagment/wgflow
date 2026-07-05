@@ -41,8 +41,51 @@ func loadMSK() *time.Location {
 
 // mskHour maps a unix-minute bucket to its hour-of-day (0–23) in Moscow time.
 func mskHour(unixMinute int64) int {
-	return time.Unix(unixMinute*60, 0).In(mskLocation).Hour()
+	return hourInLocation(unixMinute, mskLocation)
 }
+
+// hourInLocation maps a unix-minute bucket to its hour-of-day (0–23) in loc.
+func hourInLocation(unixMinute int64, loc *time.Location) int {
+	return time.Unix(unixMinute*60, 0).In(loc).Hour()
+}
+
+// Verdict-engine thresholds, shared with the snapshot/ribbon counters so
+// "minutes over X" means the same X everywhere it is computed or displayed.
+const (
+	// A minute above this is a "real use" trace; below is likely push/keep-alive.
+	significantMinuteBytes = 100 << 10
+	// A minute above this suggests streaming or downloading.
+	heavyMinuteBytes = 1 << 20
+	// A window total that alone reads as active use even without heavy minutes.
+	activeTotalBytes = 20 << 20
+	// This many >1MB minutes count as a sustained stream.
+	activeHeavyMinutes = 2
+	// How recent a TLS/DNS trace must be to count as "just now".
+	freshSignalWindow = 3 * time.Minute
+)
+
+const (
+	// loggerHeartbeatMax mirrors the frontend's staleness threshold: stats.json
+	// older than this means the capture may be down.
+	loggerHeartbeatMax = 90 * time.Second
+	// Attribution evidence windows: handshakes within strongLookback of the flow
+	// window are strong evidence; up to maxLookback they are only a low-priority
+	// fallback for CDN connections that outlive their visible handshakes.
+	attributionStrongLookback = 2 * time.Hour
+	attributionMaxLookback    = 6 * time.Hour
+	// How many candidate domains per IP the UI gets to show.
+	attributionMaxCandidates = 4
+	// Widest window the per-minute ribbon will render; wider windows return nil
+	// ("don't show the ribbon") instead of an unbounded row list.
+	ribbonMaxMinutes = 45
+	// Response-size defaults/caps for the list endpoints.
+	trafficDefaultLimit    = 50
+	dnsDefaultLimit        = 100
+	detailTopTargets       = 20
+	detailRecentEvents     = 12
+	tlsRecentSample        = 30
+	snapshotSitesPerClient = 4
+)
 
 type webServer struct {
 	logDir     string
@@ -50,6 +93,17 @@ type webServer struct {
 	wgConfig   string
 	iface      string
 	aliases    *AliasConfig
+	// loc is the -tz day-bucketing zone; nil falls back to MSK (see location).
+	loc *time.Location
+}
+
+// location returns the day-bucketing time zone. The nil fallback keeps the
+// zero-value webServer (tests, embedded use) on the historical MSK behavior.
+func (s *webServer) location() *time.Location {
+	if s.loc != nil {
+		return s.loc
+	}
+	return mskLocation
 }
 
 // resolveDeviceKind prefers the clients.yaml override, then the name-suffix guess.
@@ -71,6 +125,7 @@ func webCmd(args []string) error {
 	authPassword := fset.String("auth-password", os.Getenv("WGFLOW_WEB_PASSWORD"), "HTTP Basic Auth password; defaults to WGFLOW_WEB_PASSWORD")
 	authRealm := fset.String("auth-realm", "wgflow", "HTTP Basic Auth realm")
 	allowNoAuth := fset.Bool("allow-no-auth", false, "serve without a password even on a non-loopback address (dangerous: the whole household's traffic becomes public)")
+	tzName := fset.String("tz", "Europe/Moscow", "IANA time zone for day bucketing (backend only; the frontend still labels hours in MSK)")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
@@ -82,11 +137,21 @@ func webCmd(args []string) error {
 		// is the blessed setup), and the operator should see it in the journal.
 		log.Printf("WARNING: no auth password set — anyone who can reach %s sees all traffic history; set WGFLOW_WEB_PASSWORD to protect it", *listen)
 	}
+	// The default keeps mskLocation's tzdata-less FixedZone fallback; any other
+	// zone must resolve or the operator gets garbage hour buckets silently.
+	loc := mskLocation
+	if *tzName != "Europe/Moscow" {
+		l, err := time.LoadLocation(*tzName)
+		if err != nil {
+			return fmt.Errorf("-tz %q: %w", *tzName, err)
+		}
+		loc = l
+	}
 	aliases, err := loadAliasConfig(*clientsConfig)
 	if err != nil {
 		return fmt.Errorf("clients-config %s: %w", *clientsConfig, err)
 	}
-	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases}
+	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases, loc: loc}
 	log.Printf("clients-config=%s people=%d devices=%d", *clientsConfig, len(aliases.people), len(aliases.roster))
 	mux := http.NewServeMux()
 	s.routes(mux)
@@ -243,6 +308,68 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 // hanging a request forever on a wedged DB would be worse than failing it.
 func openRollupReadOnly(path string) (*bolt.DB, error) {
 	return bolt.Open(path, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+}
+
+// scanMinuteKeyRange walks a rollup bucket whose keys start with a zero-padded
+// minute ("%012d\t<rest>"), calling fn for [fromMin, toMin]. It breaks — not
+// skips — once past toMin: the key order makes everything after the bound
+// irrelevant, and the copies of this loop used to pay for scanning it anyway.
+func scanMinuteKeyRange(tx *bolt.Tx, bucket []byte, fromMin, toMin int64, fn func(minute int64, rest string, v []byte)) {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return
+	}
+	c := b.Cursor()
+	start := []byte(fmt.Sprintf("%012d", fromMin))
+	for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+		parts := strings.SplitN(string(k), "\t", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		m, err := strconv.ParseInt(parts[0], 10, 64)
+		if err != nil {
+			continue
+		}
+		if m > toMin {
+			break
+		}
+		if m < fromMin {
+			continue
+		}
+		fn(m, parts[1], v)
+	}
+}
+
+// scanClientCategoryRange walks flow_client_category_minute_v1 for one client
+// over [fromMin, toMin], decoding the packed totals. Returns false when the
+// bucket does not exist (a DB from before the index was introduced) so callers
+// can fall back to the heavy flow_minute_v1 scan.
+func scanClientCategoryRange(tx *bolt.Tx, name string, fromMin, toMin int64, fn func(minute int64, category string, tot RollupTotal)) bool {
+	b := tx.Bucket(rollupClientCategoryBucket)
+	if b == nil {
+		return false
+	}
+	prefix := []byte(name + "\t")
+	start := []byte(fmt.Sprintf("%s\t%012d", name, fromMin))
+	c := b.Cursor()
+	for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+		parts := strings.SplitN(string(k), "\t", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		m, err := strconv.ParseInt(parts[1], 10, 64)
+		if err != nil {
+			continue
+		}
+		if m > toMin {
+			break
+		}
+		if m < fromMin {
+			continue
+		}
+		fn(m, parts[2], decodeRollupTotalValue(v))
+	}
+	return true
 }
 
 // logRateLimited prints at most one message per key per interval. Readers run
@@ -512,7 +639,7 @@ func newAPIFlowWithAttribution(a *TopAgg, attrs map[string]apiFlowAttribution) a
 	if org != "" {
 		targetForCat += " " + org
 	}
-	if better := categorize(targetForCat, a.Target, a.Proto, a.Port); better != "other" && (category == "" || category == "other" || net.ParseIP(a.Target) != nil) {
+	if better := categorize(targetForCat, a.Target, a.Proto, a.Port); better != "other" && (category == "" || category == "other" || isIP) {
 		category = better
 	}
 	return apiFlow{
@@ -640,8 +767,8 @@ func (s *webServer) scanFlowAttributions(from, to time.Time, clientFilter string
 	// DNS/SNI often happen before the byte-heavy flow window. The first two hours
 	// are strong evidence; older matches are a low-priority fallback for CDN IPs
 	// whose connection outlives the visible handshakes.
-	strongCutoff := from.Add(-2 * time.Hour)
-	cutoff := from.Add(-6 * time.Hour)
+	strongCutoff := from.Add(-attributionStrongLookback)
+	cutoff := from.Add(-attributionMaxLookback)
 	type candMap map[string]*attributionCandidate
 	byFlow := map[string]candMap{}
 	add := func(client, ip, domain, source string, priority int, ts time.Time) {
@@ -746,10 +873,10 @@ func (s *webServer) scanFlowAttributions(from, to time.Time, clientFilter string
 		if len(rows) == 0 {
 			continue
 		}
-		names := make([]string, 0, min(len(rows), 4))
+		names := make([]string, 0, min(len(rows), attributionMaxCandidates))
 		for _, c := range rows {
 			names = append(names, c.Domain)
-			if len(names) >= 4 {
+			if len(names) >= attributionMaxCandidates {
 				break
 			}
 		}
@@ -846,7 +973,6 @@ func freshWithin(t, now time.Time, d time.Duration) bool {
 // freshness and the device kind. SILENT requires loggerOK so an outage is never
 // branded as quiet.
 func classify(series []uint64, startMinute int64, total uint64, cats []apiCatShare, devKind string, lastTLS, lastDNS, now time.Time, loggerOK bool) apiVerdict {
-	const kb, mb = 1 << 10, 1 << 20
 	var minOver1MB, minOver100KB int
 	var lastAnyMin, lastSigMin int64 = -1, -1
 	for i, b := range series {
@@ -854,15 +980,15 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 			continue
 		}
 		lastAnyMin = startMinute + int64(i)
-		if b > 100*kb {
+		if b > significantMinuteBytes {
 			minOver100KB++
 			lastSigMin = startMinute + int64(i)
 		}
-		if b > mb {
+		if b > heavyMinuteBytes {
 			minOver1MB++
 		}
 	}
-	fresh := freshWithin(lastTLS, now, 3*time.Minute) || freshWithin(lastDNS, now, 3*time.Minute)
+	fresh := freshWithin(lastTLS, now, freshSignalWindow) || freshWithin(lastDNS, now, freshSignalWindow)
 	ev := apiEvidence{
 		MinOver1MB: minOver1MB, MinOver100KB: minOver100KB,
 		DeviceKind: devKind, TotalBytes: total, FreshTLSDNS: fresh,
@@ -904,7 +1030,7 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 			v.Confidence = "low"
 			v.Reasons = append(v.Reasons, "0 байт, но здоровье логгера не подтверждено — тишина недоказуема")
 		}
-	case minOver1MB >= 2:
+	case minOver1MB >= activeHeavyMinutes:
 		v.Status = "active"
 		v.Confidence = boolPick(phone, "high", "medium")
 		v.Reasons = append(v.Reasons, fmt.Sprintf("%d мин >1 МБ — устойчивый поток", minOver1MB))
@@ -915,7 +1041,7 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 			v.Reasons = append(v.Reasons, "ноутбук — оценка мягче")
 		}
 		hedgeApple()
-	case total >= 20*mb:
+	case total >= activeTotalBytes:
 		v.Status = "active"
 		v.Confidence = boolPick(phone, "high", "medium")
 		v.Reasons = append(v.Reasons, "десятки МБ за окно")
@@ -1003,23 +1129,8 @@ func (s *webServer) throughputWindow(cutoff, now time.Time) ([]tPoint, error) {
 		return zeroThroughputSeries(cutoff, now, per), err
 	}
 	defer db.Close()
-	cutoffMinute := cutoff.Unix() / 60
 	err = db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(rollupClientBucket)
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		start := []byte(fmt.Sprintf("%012d", cutoffMinute))
-		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
-			parts := strings.SplitN(string(k), "\t", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			m, err := strconv.ParseInt(parts[0], 10, 64)
-			if err != nil || m < cutoffMinute {
-				continue
-			}
+		scanMinuteKeyRange(tx, rollupClientBucket, cutoff.Unix()/60, now.Unix()/60, func(m int64, _ string, v []byte) {
 			tot := decodeRollupTotalValue(v)
 			p := per[m]
 			if p == nil {
@@ -1028,7 +1139,7 @@ func (s *webServer) throughputWindow(cutoff, now time.Time) ([]tPoint, error) {
 			}
 			p.Down += tot.DownloadBytes
 			p.Up += tot.UploadBytes
-		}
+		})
 		return nil
 	})
 	return zeroThroughputSeries(cutoff, now, per), err
@@ -1136,7 +1247,7 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
 	}
 	dbOK := dbErr == nil
-	sites, lastTLS := s.recentSitesByClient(cutoff, 4)
+	sites, lastTLS := s.recentSitesByClient(cutoff, snapshotSitesPerClient)
 	lastDNS := s.lastDNSByClient(cutoff)
 
 	want := map[string]bool{}
@@ -1217,63 +1328,36 @@ func (s *webServer) snapshotWindow(cutoff, now time.Time) (map[string]*snapClien
 		return res, err
 	}
 	defer db.Close()
-	const kb, mb = 1 << 10, 1 << 20
 	err = db.View(func(tx *bolt.Tx) error {
-		if b := tx.Bucket(rollupClientBucket); b != nil {
-			c := b.Cursor()
-			start := []byte(fmt.Sprintf("%012d", startMin))
-			for k, v := c.Seek(start); k != nil; k, v = c.Next() {
-				parts := strings.SplitN(string(k), "\t", 2)
-				if len(parts) != 2 {
-					continue
-				}
-				m, err := strconv.ParseInt(parts[0], 10, 64)
-				if err != nil || m < startMin {
-					continue
-				}
-				idx := int(m - startMin)
-				if idx < 0 || idx >= n {
-					continue
-				}
-				sc := res[parts[1]]
-				if sc == nil {
-					sc = &snapClient{series: make([]uint64, n), cats: map[string]uint64{}}
-					res[parts[1]] = sc
-				}
-				tot := decodeRollupTotalValue(v)
-				sc.series[idx] += tot.DownloadBytes + tot.UploadBytes
-				sc.down += tot.DownloadBytes
-				sc.up += tot.UploadBytes
+		scanMinuteKeyRange(tx, rollupClientBucket, startMin, endMin, func(m int64, name string, v []byte) {
+			idx := int(m - startMin)
+			if idx < 0 || idx >= n {
+				return
 			}
-		}
+			sc := res[name]
+			if sc == nil {
+				sc = &snapClient{series: make([]uint64, n), cats: map[string]uint64{}}
+				res[name] = sc
+			}
+			tot := decodeRollupTotalValue(v)
+			sc.series[idx] += tot.DownloadBytes + tot.UploadBytes
+			sc.down += tot.DownloadBytes
+			sc.up += tot.UploadBytes
+		})
 		// category sums, seeked per client by prefix so we only touch recent minutes
-		if cb := tx.Bucket(rollupClientCategoryBucket); cb != nil {
-			for name, sc := range res {
-				prefix := []byte(name + "\t")
-				start := []byte(fmt.Sprintf("%s\t%012d", name, startMin))
-				c := cb.Cursor()
-				for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-					p := strings.SplitN(string(k), "\t", 3)
-					if len(p) != 3 {
-						continue
-					}
-					m, err := strconv.ParseInt(p[1], 10, 64)
-					if err != nil || m < startMin {
-						continue
-					}
-					tot := decodeRollupTotalValue(v)
-					sc.cats[p[2]] += tot.DownloadBytes + tot.UploadBytes
-				}
-			}
+		for name, sc := range res {
+			scanClientCategoryRange(tx, name, startMin, endMin, func(_ int64, cat string, tot RollupTotal) {
+				sc.cats[cat] += tot.DownloadBytes + tot.UploadBytes
+			})
 		}
 		return nil
 	})
 	for _, sc := range res {
 		for _, b := range sc.series {
-			if b > 100*kb {
+			if b > significantMinuteBytes {
 				sc.minOver100k++
 			}
-			if b > mb {
+			if b > heavyMinuteBytes {
 				sc.minOver1mb++
 			}
 		}
@@ -1314,28 +1398,17 @@ func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string
 	return sites, last
 }
 
-// lastSitesByClient reverse-scans tls.jsonl within the window and returns, per
-// client, the most recent SNI plus its timestamp (the timestamp feeds the
-// classifier's "fresh TLS" signal — nearly free since we already walk the file).
+// lastSitesByClient returns, per client, the most recent SNI plus its timestamp
+// (the timestamp feeds the classifier's "fresh TLS" signal — nearly free since
+// the file is walked anyway). It is the limit=1 case of recentSitesByClient.
 func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[string]time.Time) {
-	res := map[string]string{}
-	last := map[string]time.Time{}
-	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
-		var rec TLSRecord
-		if json.Unmarshal(line, &rec) != nil {
-			return true
+	sites, last := s.recentSitesByClient(cutoff, 1)
+	res := make(map[string]string, len(sites))
+	for name, list := range sites {
+		if len(list) > 0 {
+			res[name] = list[0]
 		}
-		if rec.TS.Before(cutoff) {
-			return false
-		}
-		if _, ok := last[rec.Client]; !ok {
-			last[rec.Client] = rec.TS
-		}
-		if _, ok := res[rec.Client]; !ok && rec.ServerName != "" {
-			res[rec.Client] = rec.ServerName
-		}
-		return true
-	})
+	}
 	return res, last
 }
 
@@ -1371,7 +1444,7 @@ func (s *webServer) loggerHealthy() bool {
 	if json.Unmarshal(b, &st) != nil || st.UpdatedAt.IsZero() {
 		return false
 	}
-	return time.Since(st.UpdatedAt) < 90*time.Second
+	return time.Since(st.UpdatedAt) < loggerHeartbeatMax
 }
 
 // seriesByClient returns a zero-filled per-minute byte total (download+upload)
@@ -1386,33 +1459,19 @@ func (s *webServer) seriesByClient(db *bolt.DB, cutoff, now time.Time) (map[stri
 		return res, nil
 	}
 	err := db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(rollupClientBucket)
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		start := []byte(fmt.Sprintf("%012d", startMin))
-		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
-			parts := strings.SplitN(string(k), "\t", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			m, err := strconv.ParseInt(parts[0], 10, 64)
-			if err != nil || m < startMin {
-				continue
-			}
+		scanMinuteKeyRange(tx, rollupClientBucket, startMin, endMin, func(m int64, name string, v []byte) {
 			idx := int(m - startMin)
 			if idx < 0 || idx >= n {
-				continue
+				return
 			}
-			arr := res[parts[1]]
+			arr := res[name]
 			if arr == nil {
 				arr = make([]uint64, n)
-				res[parts[1]] = arr
+				res[name] = arr
 			}
 			tot := decodeRollupTotalValue(v)
 			arr[idx] += tot.DownloadBytes + tot.UploadBytes
-		}
+		})
 		return nil
 	})
 	return res, err
@@ -1480,11 +1539,11 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		targets = append(targets, f)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Total > targets[j].Total })
-	if len(targets) > 20 {
-		targets = targets[:20]
+	if len(targets) > detailTopTargets {
+		targets = targets[:detailTopTargets]
 	}
-	recentDNS := s.recentDNSForClient(name, recentCutoff, to, 12)
-	recentTLS := s.recentTLSForClient(name, recentCutoff, to, 12)
+	recentDNS := s.recentDNSForClient(name, recentCutoff, to, detailRecentEvents)
+	recentTLS := s.recentTLSForClient(name, recentCutoff, to, detailRecentEvents)
 	cats := mapToShares(cat)
 	loggerOK := s.loggerHealthy()
 	devKind := s.resolveDeviceKind(name)
@@ -1563,22 +1622,10 @@ func (s *webServer) clientFlowsWindow(db *bolt.DB, name string, from, to time.Ti
 	toMin := to.Unix() / 60
 	aggs := map[string]*TopAgg{}
 	err := db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket(rollupBucket)
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		start := []byte(fmt.Sprintf("%012d", fromMin))
-		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+		scanMinuteKeyRange(tx, rollupBucket, fromMin, toMin, func(_ int64, _ string, v []byte) {
 			var row RollupRow
-			if json.Unmarshal(v, &row) != nil {
-				continue
-			}
-			if row.Minute > toMin {
-				break
-			}
-			if row.Minute < fromMin || row.Client != name {
-				continue
+			if json.Unmarshal(v, &row) != nil || row.Client != name {
+				return
 			}
 			key := row.Client + "\t" + row.Category + "\t" + row.Target + "\t" + row.Proto + "\t" + strconv.Itoa(int(row.Port))
 			a := aggs[key]
@@ -1590,7 +1637,7 @@ func (s *webServer) clientFlowsWindow(db *bolt.DB, name string, from, to time.Ti
 			a.Up += row.UploadBytes
 			a.DownP += row.DownloadPackets
 			a.UpP += row.UploadPackets
-		}
+		})
 		return nil
 	})
 	out := make([]*TopAgg, 0, len(aggs))
@@ -1628,14 +1675,12 @@ func (s *webServer) clientMinuteRibbon(name string, from, to time.Time) []apiMin
 // binary buckets only, no domain join. Capped so it can't be asked to render an
 // unbounded ribbon; nil means "window too wide, don't show the ribbon".
 func (s *webServer) minuteRibbon(db *bolt.DB, name string, from, to time.Time) []apiMinute {
-	const maxMinutes = 45
 	fromMin := from.Unix() / 60
 	toMin := to.Unix() / 60
 	n := int(toMin - fromMin + 1)
-	if n <= 0 || n > maxMinutes {
+	if n <= 0 || n > ribbonMaxMinutes {
 		return nil
 	}
-	const kb, mb = 1 << 10, 1 << 20
 	out := make([]apiMinute, n)
 	cats := make([]map[string]uint64, n)
 	for i := range out {
@@ -1645,58 +1690,23 @@ func (s *webServer) minuteRibbon(db *bolt.DB, name string, from, to time.Time) [
 		return out
 	}
 	viewErr := db.View(func(tx *bolt.Tx) error {
-		if b := tx.Bucket(rollupClientBucket); b != nil {
-			c := b.Cursor()
-			start := []byte(fmt.Sprintf("%012d", fromMin))
-			for k, v := c.Seek(start); k != nil; k, v = c.Next() {
-				parts := strings.SplitN(string(k), "\t", 2)
-				if len(parts) != 2 {
-					continue
-				}
-				m, err := strconv.ParseInt(parts[0], 10, 64)
-				if err != nil {
-					continue
-				}
-				if m > toMin {
-					break
-				}
-				if m < fromMin || parts[1] != name {
-					continue
-				}
-				tot := decodeRollupTotalValue(v)
-				idx := int(m - fromMin)
-				out[idx].Down += tot.DownloadBytes
-				out[idx].Up += tot.UploadBytes
-				out[idx].Bytes += tot.DownloadBytes + tot.UploadBytes
+		scanMinuteKeyRange(tx, rollupClientBucket, fromMin, toMin, func(m int64, client string, v []byte) {
+			if client != name {
+				return
 			}
-		}
-		if cb := tx.Bucket(rollupClientCategoryBucket); cb != nil {
-			prefix := []byte(name + "\t")
-			start := []byte(fmt.Sprintf("%s\t%012d", name, fromMin))
-			c := cb.Cursor()
-			for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-				p := strings.SplitN(string(k), "\t", 3)
-				if len(p) != 3 {
-					continue
-				}
-				m, err := strconv.ParseInt(p[1], 10, 64)
-				if err != nil {
-					continue
-				}
-				if m > toMin {
-					break
-				}
-				if m < fromMin {
-					continue
-				}
-				idx := int(m - fromMin)
-				if cats[idx] == nil {
-					cats[idx] = map[string]uint64{}
-				}
-				tot := decodeRollupTotalValue(v)
-				cats[idx][p[2]] += tot.DownloadBytes + tot.UploadBytes
+			tot := decodeRollupTotalValue(v)
+			idx := int(m - fromMin)
+			out[idx].Down += tot.DownloadBytes
+			out[idx].Up += tot.UploadBytes
+			out[idx].Bytes += tot.DownloadBytes + tot.UploadBytes
+		})
+		scanClientCategoryRange(tx, name, fromMin, toMin, func(m int64, cat string, tot RollupTotal) {
+			idx := int(m - fromMin)
+			if cats[idx] == nil {
+				cats[idx] = map[string]uint64{}
 			}
-		}
+			cats[idx][cat] += tot.DownloadBytes + tot.UploadBytes
+		})
 		return nil
 	})
 	if viewErr != nil {
@@ -1706,8 +1716,8 @@ func (s *webServer) minuteRibbon(db *bolt.DB, name string, from, to time.Time) [
 		if cats[i] != nil {
 			out[i].TopCategory = topKey(cats[i])
 		}
-		out[i].Over100K = out[i].Bytes > 100*kb
-		out[i].Over1M = out[i].Bytes > mb
+		out[i].Over100K = out[i].Bytes > significantMinuteBytes
+		out[i].Over1M = out[i].Bytes > heavyMinuteBytes
 	}
 	return out
 }
@@ -1838,52 +1848,31 @@ func (s *webServer) dayTimeline(db *bolt.DB, name string) []apiHour {
 	if db == nil {
 		return buckets
 	}
-	now := time.Now().In(mskLocation)
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, mskLocation)
+	loc := s.location()
+	now := time.Now().In(loc)
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
 	fromMinute := midnight.Unix() / 60
 	// Ignore rows past the current minute (clock skew) so future hours stay zero.
 	nowMinute := now.Unix() / 60
 	if err := db.View(func(tx *bolt.Tx) error {
-		if b := tx.Bucket(rollupClientCategoryBucket); b != nil {
-			prefix := []byte(name + "\t")
-			start := []byte(fmt.Sprintf("%s\t%012d", name, fromMinute))
-			c := b.Cursor()
-			for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-				parts := strings.SplitN(string(k), "\t", 3)
-				if len(parts) != 3 {
-					continue
-				}
-				minute, err := strconv.ParseInt(parts[1], 10, 64)
-				if err != nil || minute < fromMinute || minute > nowMinute {
-					continue
-				}
-				total := decodeRollupTotalValue(v)
-				h := mskHour(minute)
-				bt := total.DownloadBytes + total.UploadBytes
-				buckets[h].Cats[parts[2]] += bt
-				buckets[h].Total += bt
-			}
+		if scanClientCategoryRange(tx, name, fromMinute, nowMinute, func(minute int64, cat string, tot RollupTotal) {
+			h := hourInLocation(minute, loc)
+			bt := tot.DownloadBytes + tot.UploadBytes
+			buckets[h].Cats[cat] += bt
+			buckets[h].Total += bt
+		}) {
 			return nil
 		}
-		b := tx.Bucket(rollupBucket)
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		start := []byte(fmt.Sprintf("%012d", fromMinute))
-		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+		scanMinuteKeyRange(tx, rollupBucket, fromMinute, nowMinute, func(minute int64, _ string, v []byte) {
 			var row RollupRow
-			if json.Unmarshal(v, &row) != nil {
-				continue
+			if json.Unmarshal(v, &row) != nil || row.Client != name {
+				return
 			}
-			if row.Minute < fromMinute || row.Minute > nowMinute || row.Client != name {
-				continue
-			}
-			h := mskHour(row.Minute)
+			h := hourInLocation(minute, loc)
 			bt := row.DownloadBytes + row.UploadBytes
 			buckets[h].Cats[row.Category] += bt
 			buckets[h].Total += bt
-		}
+		})
 		return nil
 	}); err != nil {
 		logRateLimited("rollup", "wgflow web: rollup read: %v", err)
@@ -1900,7 +1889,7 @@ func (s *webServer) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	catFilter := q.Get("category")
 	protoFilter := q.Get("proto")
 	search := strings.ToLower(q.Get("q"))
-	limit := atoiDefault(q.Get("limit"), 50)
+	limit := atoiDefault(q.Get("limit"), trafficDefaultLimit)
 	aggs := map[string]*TopAgg{}
 	_, dbErr := aggregateFromRollup(s.rollupPath, cutoff, clientFilter, aggs)
 	if dbErr != nil {
@@ -1990,7 +1979,7 @@ func (s *webServer) handleDNS(w http.ResponseWriter, r *http.Request) {
 	qtype := q.Get("qtype")
 	errorsOnly := q.Get("errors") == "1" || q.Get("errors") == "true"
 	search := strings.ToLower(q.Get("q"))
-	limit := atoiDefault(q.Get("limit"), 100)
+	limit := atoiDefault(q.Get("limit"), dnsDefaultLimit)
 	out := []DNSRecord{}
 	errCount := 0
 	scanLogReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
@@ -2075,7 +2064,7 @@ func (s *webServer) handleTLS(w http.ResponseWriter, r *http.Request) {
 		if rec.TS.After(g.last) {
 			g.last = rec.TS
 		}
-		if len(recent) < 30 {
+		if len(recent) < tlsRecentSample {
 			recent = append(recent, rec)
 		}
 		return true
