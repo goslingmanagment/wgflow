@@ -1,28 +1,16 @@
 <script>
   import { trackRefreshTick } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtShort, uptime, ago } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { fmtBytes, fmtShort, uptime, ago } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import HealthPill from '../lib/HealthPill.svelte'
 
-  let data = $state(null)
-  let err = $state(null)
-  const runLatest = createLatestRunner()
+  const res = createResource()
   $effect(() => {
     trackRefreshTick()
-    load()
+    res.load('/api/system')
   })
-  async function load() {
-    await runLatest(
-      () => getJSON('/api/system'),
-      (next) => {
-        data = next
-        err = null
-      },
-      (e) => {
-        err = errorMessage(e)
-      },
-    )
-  }
+  const data = $derived(res.data)
   const st = $derived(data?.stats || {})
   const cfg = $derived(data?.config || {})
   const decoded = $derived(st.packet_seen ? (st.packet_decoded / st.packet_seen) * 100 : 0)
@@ -38,7 +26,8 @@
 
 <div class="head"><h1 class="serif">System</h1><HealthPill /></div>
 
-{#if err}<p class="err">Couldn't load system. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+{#if res.err && !data}<p class="err">Couldn't load system. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+  {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
   <div class="grid">
     <div class="card">
       <h3 class="serif">Configuration</h3>

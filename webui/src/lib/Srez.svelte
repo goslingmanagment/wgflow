@@ -1,7 +1,8 @@
 <script>
-  import { getJSON, fmtBytes, hhmmMSK } from './format.js'
-  import { createLatestRunner, errorMessage } from './load.js'
+  import { fmtBytes, hhmmMSK } from './format.js'
+  import { createResource } from './resource.svelte.js'
   import { trackRefreshTick } from './store.svelte.js'
+  import StaleBanner from './StaleBanner.svelte'
 
   // The Срез drawer. It assembles ONE plain-text verdict block, renders that
   // exact string, and copies that exact string — so the screen and the clipboard
@@ -10,13 +11,11 @@
   let { open = false, onClose = () => {}, names = [] } = $props()
 
   let win = $state('5m')
-  let snap = $state(null)
-  let err = $state(null)
-  let loading = $state(false)
   let copied = $state(false)
   let copyErr = $state(false)
   let snapWin = $state('')
-  const runLatest = createLatestRunner()
+  const res = createResource()
+  const snap = $derived(res.data)
 
   const CAVEAT =
     '⚠ inferred из метаданных. HTTPS не виден; QUIC даёт IP без имени; ' +
@@ -24,35 +23,22 @@
 
   $effect(() => {
     trackRefreshTick()
-    if (open) load(win, names.join(','))
+    const w = win
+    const n = names.join(',')
+    if (open) load(w, n)
   })
 
   async function load(w, clients) {
-    loading = true
+    // A new window must never show the old window's text under its label —
+    // blank first (the copy button copies exactly what's on screen).
     if (snapWin && snapWin !== w) {
-      snap = null
+      res.reset()
       snapWin = ''
     }
-    err = null
-    try {
-      const u = new URLSearchParams({ since: w })
-      if (clients) u.set('clients', clients)
-      const applied = await runLatest(
-        () => getJSON('/api/snapshot?' + u.toString()),
-        (next) => {
-          snap = next
-          snapWin = w
-          err = null
-        },
-        (e) => {
-          err = errorMessage(e)
-        },
-      )
-      if (applied) loading = false
-    } catch (e) {
-      err = errorMessage(e)
-      loading = false
-    }
+    const u = new URLSearchParams({ since: w })
+    if (clients) u.set('clients', clients)
+    const applied = await res.load('/api/snapshot?' + u.toString())
+    if (applied) snapWin = w
   }
 
   const WL = { '5m': '5 минут', '10m': '10 минут', '15m': '15 минут', '30m': '30 минут' }
@@ -175,11 +161,14 @@
     {#if copyErr}
       <div class="copyhint">Не удалось скопировать автоматически — выделите текст и ⌘/Ctrl+C.</div>
     {/if}
-    {#if err}
-      <p class="err">Не удалось получить срез. ({err})</p>
-    {:else if loading && !snap}
+    {#if res.err && !snap}
+      <p class="err">Не удалось получить срез. ({res.err})</p>
+    {:else if !snap}
       <p class="dim">Загрузка…</p>
     {:else}
+      {#if res.stale}
+        <div class="stalepad"><StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} /></div>
+      {/if}
       <pre class="srez">{text}</pre>
     {/if}
   </div>
@@ -309,6 +298,9 @@
     margin: 10px 16px 0;
     color: var(--color-muted);
     font-size: 11.5px;
+  }
+  .stalepad {
+    margin: 12px 16px 0;
   }
   .err {
     color: var(--color-danger);

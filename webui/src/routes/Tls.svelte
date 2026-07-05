@@ -1,38 +1,20 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { getJSON, catColor, ago } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { catColor, ago } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import Win from '../lib/Win.svelte'
 
-  let data = $state(null)
-  let err = $state(null)
   let q = $state('')
-  const runLatest = createLatestRunner()
+  const res = createResource()
 
   $effect(() => {
     trackRefreshTick()
-    const s = ui.since,
-      qq = q
-    load(s, qq)
+    const u = new URLSearchParams({ since: ui.since })
+    if (q) u.set('q', q)
+    res.load('/api/tls?' + u.toString())
   })
-  async function load(s, qq) {
-    try {
-      const u = new URLSearchParams({ since: s })
-      if (qq) u.set('q', qq)
-      await runLatest(
-        () => getJSON('/api/tls?' + u.toString()),
-        (next) => {
-          data = next
-          err = null
-        },
-        (e) => {
-          err = errorMessage(e)
-        },
-      )
-    } catch (e) {
-      err = errorMessage(e)
-    }
-  }
+  const data = $derived(res.data)
   const sites = $derived(data?.sites || [])
   const maxHits = $derived(Math.max(1, ...sites.map((s) => s.hits)))
 </script>
@@ -40,7 +22,8 @@
 <div class="head"><h1 class="serif">Sites <small>TLS/QUIC SNI</small></h1><span class="pgwin"><Win /></span></div>
 <div class="filters"><input placeholder="search site" bind:value={q} /><span class="cnt">last {ui.since} · {sites.length} sites</span></div>
 
-{#if err}<p class="err">Couldn't load sites. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+{#if res.err && !data}<p class="err">Couldn't load sites. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+  {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
   <div class="card">
     {#each sites as s}
       <div class="site">

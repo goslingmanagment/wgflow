@@ -1,7 +1,8 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
@@ -48,11 +49,9 @@
   }
 
   let { param } = $props()
-  let data = $state(null)
-  let err = $state(null)
   let fromAnchor = $state(null) // unix seconds, or null = relative window
   let anchorInput = $state('')
-  const runLatest = createLatestRunner()
+  const res = createResource()
 
   // Reset any anchor when switching clients (declared first so it runs before the
   // loader, which would otherwise fire once with the previous client's anchor).
@@ -63,30 +62,16 @@
   })
   $effect(() => {
     trackRefreshTick()
-    const n = param
-    const s = ui.since
-    const f = fromAnchor
-    load(n, s, f)
+    const u = new URLSearchParams()
+    if (fromAnchor) u.set('from', fromAnchor)
+    else u.set('since', ui.since)
+    res.load('/api/clients/' + encodeURIComponent(param) + '?' + u.toString())
   })
-  async function load(n, s, f) {
-    try {
-      const u = new URLSearchParams()
-      if (f) u.set('from', f)
-      else u.set('since', s)
-      await runLatest(
-        () => getJSON('/api/clients/' + encodeURIComponent(n) + '?' + u.toString()),
-        (next) => {
-          data = next
-          err = null
-        },
-        (e) => {
-          err = errorMessage(e)
-        },
-      )
-    } catch (e) {
-      err = errorMessage(e)
-    }
-  }
+  const data = $derived(res.data)
+  // The API 404s for a peer wgflow doesn't know (it used to answer 200 with
+  // zeros); show "not found" rather than a raw HTTP error, even if an earlier
+  // client's data is still around.
+  const notFound = $derived(res.errStatus === 404)
   function applyAnchor() {
     const u = mskAnchorUnix(anchorInput)
     if (u) fromAnchor = u
@@ -111,11 +96,17 @@
 
 <a class="back" href="#/clients"><Icon name="chevron" size={14} /> Clients</a>
 
-{#if err}
-  <p class="err">Couldn't load this client. ({err})</p>
+{#if notFound}
+  <p class="err">Client “{param}” not found — no such peer in the WireGuard config or logs.</p>
+  <p class="dim">Pick one from the <a class="lnk" href="#/clients">Clients</a> list.</p>
+{:else if res.err && !data}
+  <p class="err">Couldn't load this client. ({res.err})</p>
 {:else if !data}
   <p class="dim">Loading…</p>
 {:else}
+  {#if res.stale}
+    <StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />
+  {/if}
   <div class="who">
     <h1 class="serif">{data.name}</h1>
     <VerdictBadge verdict={data.verdict} loggerOk={data.logger_ok} />
@@ -484,6 +475,9 @@
   }
   .dim {
     color: var(--color-muted);
+  }
+  .lnk {
+    color: var(--color-coral);
   }
   .empty {
     color: var(--color-muted);

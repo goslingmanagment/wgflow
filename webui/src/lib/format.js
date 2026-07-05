@@ -1,7 +1,40 @@
-export async function getJSON(url) {
-  const r = await fetch(url)
-  if (!r.ok) throw new Error('HTTP ' + r.status)
-  return r.json()
+// Every fetch gets a hard deadline. The server speaks plain HTTP/1.1 (no TLS),
+// so the browser caps us at 6 connections and one is permanently held by the
+// SSE stream — a single hung request would queue everything behind it and
+// freeze the whole panel. `signal` (optional) lets callers abort earlier.
+const FETCH_TIMEOUT_MS = 10_000
+
+export async function getJSON(url, signal) {
+  const c = new AbortController()
+  // Flag-based timeout instead of AbortSignal.timeout/any: older iOS Safari
+  // doesn't propagate abort reasons, and we must tell "timed out" (a real
+  // error) apart from "superseded" (not an error).
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    c.abort()
+  }, FETCH_TIMEOUT_MS)
+  const onOuter = () => c.abort()
+  signal?.addEventListener('abort', onOuter, { once: true })
+  try {
+    const r = await fetch(url, { signal: c.signal })
+    if (!r.ok) {
+      const e = new Error('HTTP ' + r.status)
+      e.status = r.status
+      throw e
+    }
+    return await r.json()
+  } catch (e) {
+    if (timedOut) {
+      const t = new Error(`no response in ${FETCH_TIMEOUT_MS / 1000}s`)
+      t.name = 'TimeoutError'
+      throw t
+    }
+    throw e
+  } finally {
+    clearTimeout(timer)
+    signal?.removeEventListener('abort', onOuter)
+  }
 }
 
 const UNITS = ['B', 'KiB', 'MiB', 'GiB', 'TiB']
@@ -147,11 +180,14 @@ export function catColor(c) {
 }
 
 // Verdict status -> dot color. active = the coral active/brand hue; likely-bg =
-// warn amber (deliberately not danger-red); silent = muted grey.
+// warn amber (deliberately not danger-red); silent = muted grey; unknown (the
+// rollup DB is unavailable, so no verdict could be computed) = warn amber too —
+// an unproven state must never look as calm as proven silence.
 export const VERDICT_COLORS = {
   active: 'var(--color-coral)',
   'likely-background': 'var(--color-warn)',
   silent: 'var(--color-muted)',
+  unknown: 'var(--color-warn)',
 }
 export function verdictColor(status) {
   return VERDICT_COLORS[status] || 'var(--color-muted)'

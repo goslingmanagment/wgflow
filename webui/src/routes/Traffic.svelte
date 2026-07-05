@@ -1,44 +1,24 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, catColor } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { fmtBytes, catColor } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import Win from '../lib/Win.svelte'
 
-  let data = $state(null)
-  let err = $state(null)
   let cat = $state('all')
   let proto = $state('all')
   let q = $state('')
-  const runLatest = createLatestRunner()
+  const res = createResource()
 
   $effect(() => {
     trackRefreshTick()
-    const s = ui.since,
-      c = cat,
-      p = proto,
-      qq = q
-    load(s, c, p, qq)
+    const u = new URLSearchParams({ since: ui.since, limit: '60' })
+    if (cat !== 'all') u.set('category', cat)
+    if (proto !== 'all') u.set('proto', proto)
+    if (q) u.set('q', q)
+    res.load('/api/traffic?' + u.toString())
   })
-  async function load(s, c, p, qq) {
-    try {
-      const u = new URLSearchParams({ since: s, limit: '60' })
-      if (c !== 'all') u.set('category', c)
-      if (p !== 'all') u.set('proto', p)
-      if (qq) u.set('q', qq)
-      await runLatest(
-        () => getJSON('/api/traffic?' + u.toString()),
-        (next) => {
-          data = next
-          err = null
-        },
-        (e) => {
-          err = errorMessage(e)
-        },
-      )
-    } catch (e) {
-      err = errorMessage(e)
-    }
-  }
+  const data = $derived(res.data)
   const CATS = ['all', 'google', 'meta', 'apple', 'telegram', 'yandex', 'bytedance', 'fansly', 'twitch', 'cloudflare', 'aws', 'discord', 'games', 'p2p', 'dns', 'other']
 </script>
 
@@ -49,7 +29,8 @@
   <input placeholder="search target" bind:value={q} />
 </div>
 
-{#if err}<p class="err">Couldn't load traffic. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+{#if res.err && !data}<p class="err">Couldn't load traffic. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+  {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
   <div class="bar">last {ui.since} · {data.rows.length} of {data.total} flows · sorted by total</div>
   <div class="card">
     <div class="tscroll">

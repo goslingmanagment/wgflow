@@ -1,44 +1,24 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { dnsRcodeName, getJSON, hhmmssMSK } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { dnsRcodeName, hhmmssMSK } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import Win from '../lib/Win.svelte'
 
-  let data = $state(null)
-  let err = $state(null)
   let qtype = $state('all')
   let errorsOnly = $state(false)
   let q = $state('')
-  const runLatest = createLatestRunner()
+  const res = createResource()
 
   $effect(() => {
     trackRefreshTick()
-    const s = ui.since,
-      t = qtype,
-      e = errorsOnly,
-      qq = q
-    load(s, t, e, qq)
+    const u = new URLSearchParams({ since: ui.since, limit: '120' })
+    if (qtype !== 'all') u.set('qtype', qtype)
+    if (errorsOnly) u.set('errors', '1')
+    if (q) u.set('q', q)
+    res.load('/api/dns?' + u.toString())
   })
-  async function load(s, t, e, qq) {
-    try {
-      const u = new URLSearchParams({ since: s, limit: '120' })
-      if (t !== 'all') u.set('qtype', t)
-      if (e) u.set('errors', '1')
-      if (qq) u.set('q', qq)
-      await runLatest(
-        () => getJSON('/api/dns?' + u.toString()),
-        (next) => {
-          data = next
-          err = null
-        },
-        (e2) => {
-          err = errorMessage(e2)
-        },
-      )
-    } catch (e2) {
-      err = errorMessage(e2)
-    }
-  }
+  const data = $derived(res.data)
   const QT = ['all', 'A', 'AAAA', 'CNAME', 'HTTPS']
 </script>
 
@@ -49,7 +29,8 @@
   <input placeholder="search query" bind:value={q} />
 </div>
 
-{#if err}<p class="err">Couldn't load DNS. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+{#if res.err && !data}<p class="err">Couldn't load DNS. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+  {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
   <div class="bar">last {ui.since} · {data.records.length} shown · <span class="warn">{data.errors} DNS errors</span></div>
   <div class="card">
     <div class="tscroll">

@@ -1,42 +1,22 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtShort, catColor } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { fmtBytes, fmtShort, catColor } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
   import Chart from '../lib/Chart.svelte'
   import Mix from '../lib/Mix.svelte'
+  import StaleBanner from '../lib/StaleBanner.svelte'
 
-  let sys = $state(null)
-  let thr = $state(null)
-  let clients = $state(null)
-  let cats = $state(null)
-  let err = $state(null)
-  const runLatest = createLatestRunner()
+  const res = createResource()
 
   $effect(() => {
     trackRefreshTick()
     const s = ui.since
-    load(s)
+    res.load(['/api/system', '/api/throughput?since=' + s, '/api/clients?since=' + s, '/api/categories?since=' + s])
   })
-  async function load(s) {
-    await runLatest(
-      () => Promise.all([
-        getJSON('/api/system'),
-        getJSON('/api/throughput?since=' + s),
-        getJSON('/api/clients?since=' + s),
-        getJSON('/api/categories?since=' + s),
-      ]),
-      ([a, b, c, d]) => {
-        sys = a
-        thr = b
-        clients = c
-        cats = d
-        err = null
-      },
-      (e) => {
-        err = errorMessage(e)
-      },
-    )
-  }
+  const sys = $derived(res.data?.[0])
+  const thr = $derived(res.data?.[1])
+  const clients = $derived(res.data?.[2])
+  const cats = $derived(res.data?.[3])
 
   const st = $derived(sys?.stats || {})
   const thrPoints = $derived((thr?.points || []).map((p) => ({ t: p.t, v: ((p.down + p.up) * 8) / 60 / 1e6 })))
@@ -46,10 +26,16 @@
   const catTotal = $derived(catList.reduce((s, c) => s + c.total, 0) || 1)
 </script>
 
-{#if err}
-  <p class="err">Couldn't load overview. ({err})</p>
+{#if res.err && !res.data}
+  <p class="err">Couldn't load overview. ({res.err})</p>
 {:else}
   <h1 class="serif">Overview</h1>
+  {#if res.stale}
+    <StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />
+  {/if}
+  {#if clients?.db_ok === false}
+    <div class="outage" role="alert">⚠ Rollup DB unavailable — verdicts are unknown and totals may be incomplete.</div>
+  {/if}
   <div class="kpis">
     <div class="kpi"><div class="k">Throughput</div><div class="v mono">{(st.bit_rate_per_second / 1e6 || 0).toFixed(1)}</div><div class="s">Mbit/s now · avg {(st.average_bit_rate_per_second / 1e6 || 0).toFixed(0)}</div></div>
     <div class="kpi"><div class="k">Packets/s</div><div class="v mono">{fmtShort(st.packet_rate_per_second || 0)}</div><div class="s">avg {fmtShort(st.average_packet_rate_per_second || 0)}</div></div>
@@ -200,5 +186,14 @@
   }
   .err {
     color: var(--color-danger);
+  }
+  .outage {
+    background: color-mix(in srgb, var(--color-warn) 16%, transparent);
+    border: 1px solid color-mix(in srgb, var(--color-warn) 40%, transparent);
+    color: var(--color-warn);
+    border-radius: 9px;
+    padding: 9px 12px;
+    font-size: 12.5px;
+    margin-bottom: 10px;
   }
 </style>

@@ -1,37 +1,25 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, catColor } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { fmtBytes, catColor } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import Win from '../lib/Win.svelte'
   import Donut from '../lib/Donut.svelte'
 
-  let data = $state(null)
-  let err = $state(null)
-  const runLatest = createLatestRunner()
+  const res = createResource()
   $effect(() => {
     trackRefreshTick()
-    const s = ui.since
-    load(s)
+    res.load('/api/categories?since=' + ui.since)
   })
-  async function load(s) {
-    await runLatest(
-      () => getJSON('/api/categories?since=' + s),
-      (next) => {
-        data = next
-        err = null
-      },
-      (e) => {
-        err = errorMessage(e)
-      },
-    )
-  }
+  const data = $derived(res.data)
   const list = $derived(data?.categories || [])
   const total = $derived(list.reduce((s, c) => s + c.total, 0) || 1)
 </script>
 
 <div class="head"><h1 class="serif">Categories</h1><span class="pgwin"><Win /></span></div>
 
-{#if err}<p class="err">Couldn't load categories. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+{#if res.err && !data}<p class="err">Couldn't load categories. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+  {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
   <div class="card hero">
     <Donut items={list} size={118} />
     <div class="sum">

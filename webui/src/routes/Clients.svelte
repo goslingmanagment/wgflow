@@ -1,38 +1,25 @@
 <script>
   import { setGroup, trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes, fmtRate, sinceSeconds, catColor, ago, verdictColor, deviceGlyph } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { fmtBytes, fmtRate, sinceSeconds, catColor, verdictColor, deviceGlyph } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
   import Icon from '../lib/Icon.svelte'
   import HealthPill from '../lib/HealthPill.svelte'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import VerdictBadge from '../lib/VerdictBadge.svelte'
   import Srez from '../lib/Srez.svelte'
 
-  let data = $state(null)
-  let err = $state(null)
   let search = $state('')
   let sort = $state('total')
   let srezOpen = $state(false)
-  const runLatest = createLatestRunner()
+  const res = createResource()
 
   $effect(() => {
     trackRefreshTick()
-    const s = ui.since
-    load(s)
+    res.load('/api/clients?since=' + ui.since)
   })
-  async function load(s) {
-    await runLatest(
-      () => getJSON('/api/clients?since=' + s),
-      (next) => {
-        data = next
-        err = null
-      },
-      (e) => {
-        err = errorMessage(e)
-      },
-    )
-  }
+  const data = $derived(res.data)
 
   let manualOpen = $state(new Set())
 
@@ -99,11 +86,17 @@
 
 <Srez open={srezOpen} onClose={() => (srezOpen = false)} names={(data?.clients || []).map((c) => c.name)} />
 
-{#if err}
-  <p class="err">Couldn't load clients. Is <code>wgflow web</code> running? ({err})</p>
+{#if res.err && !data}
+  <p class="err">Couldn't load clients. Is <code>wgflow web</code> running? ({res.err})</p>
 {:else if !data}
   <p class="dim">Loading…</p>
 {:else}
+  {#if res.stale}
+    <StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />
+  {/if}
+  {#if data.db_ok === false}
+    <div class="outage" role="alert">⚠ Rollup DB unavailable — verdicts are unknown and totals may be incomplete.</div>
+  {/if}
   <div class="cnt">
     <span class="grp">group
       <button class:on={ui.group === 'person'} onclick={() => setGroup('person')}>person</button>

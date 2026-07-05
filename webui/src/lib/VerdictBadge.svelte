@@ -18,6 +18,9 @@
       if (!loggerOk) return { cls: 'unconfirmed', label: 'тишина не подтв.', title: 'логгер не подтверждён — тишина недоказуема' + CAVEAT }
       return { cls: 'silent', label: 'тишина', title }
     }
+    // The server refuses to judge when the rollup DB is unavailable — surface
+    // that as its own state, never as calm silence.
+    if (v.status === 'unknown') return { cls: 'unknown', label: 'нет вердикта', title: ((v.reasons || []).join(' · ') || 'rollup недоступен — вердикт невозможен') + CAVEAT }
     return { cls: 'silent', label: v.status, title }
   })
 </script>
@@ -73,5 +76,10 @@
   .vb.unconfirmed {
     color: var(--color-danger);
     background: color-mix(in srgb, var(--color-danger) 15%, transparent);
+  }
+  .vb.unknown {
+    color: var(--color-warn);
+    background: color-mix(in srgb, var(--color-warn) 12%, transparent);
+    border: 1px dashed color-mix(in srgb, var(--color-warn) 45%, transparent);
   }
 </style>

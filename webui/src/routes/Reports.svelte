@@ -1,7 +1,8 @@
 <script>
   import { trackRefreshTick } from '../lib/store.svelte.js'
-  import { getJSON, fmtBytes } from '../lib/format.js'
-  import { createLatestRunner, errorMessage } from '../lib/load.js'
+  import { fmtBytes } from '../lib/format.js'
+  import { createResource } from '../lib/resource.svelte.js'
+  import StaleBanner from '../lib/StaleBanner.svelte'
   import Icon from '../lib/Icon.svelte'
 
   const WINS = [
@@ -12,27 +13,13 @@
     ['720h', '30d'],
   ]
   let since = $state('24h')
-  let data = $state(null)
-  let err = $state(null)
-  const runLatest = createLatestRunner()
+  const res = createResource()
 
   $effect(() => {
     trackRefreshTick()
-    const s = since
-    load(s)
+    res.load('/api/report?since=' + since)
   })
-  async function load(s) {
-    await runLatest(
-      () => getJSON('/api/report?since=' + s),
-      (next) => {
-        data = next
-        err = null
-      },
-      (e) => {
-        err = errorMessage(e)
-      },
-    )
-  }
+  const data = $derived(res.data)
   const cTotal = $derived((data?.by_client || []).reduce((a, r) => a + r.total, 0) || 1)
   const kTotal = $derived((data?.by_category || []).reduce((a, r) => a + r.total, 0) || 1)
 
@@ -58,7 +45,8 @@
   </div>
 </div>
 
-{#if err}<p class="err">Couldn't load report. ({err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+{#if res.err && !data}<p class="err">Couldn't load report. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
+  {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
   <div class="summ">Window <b>{WINS.find((w) => w[0] === since)?.[1]}</b> · rollup rows <b class="mono">{data.rollup_rows.toLocaleString()}</b></div>
   <div class="two">
     <div class="card">
