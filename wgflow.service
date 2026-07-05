@@ -10,6 +10,21 @@ Restart=always
 RestartSec=3
 User=root
 NoNewPrivileges=true
+# Sandbox: the daemon only needs raw-socket capture (CAP_NET_RAW; CAP_NET_ADMIN
+# for SO_RCVBUFFORCE) plus write access to its log and rollup dirs. Everything
+# else — filesystem, kernel knobs, namespaces — is locked down.
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+ProtectSystem=strict
+ReadWritePaths=/var/log/wgflow /var/lib/wgflow
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target

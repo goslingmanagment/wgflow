@@ -65,12 +65,32 @@ wgflow web --listen :8080 &
 pnpm --dir webui dev
 ```
 
-The panel is read-only. If you expose it outside localhost, set a Basic Auth
-password with `WGFLOW_WEB_PASSWORD` or `--auth-password`:
+The panel is read-only. Listening on a non-loopback address **requires** a
+Basic Auth password — without one the server refuses to start (override with
+`--allow-no-auth` if you really know what you are doing):
 
 ```sh
 WGFLOW_WEB_PASSWORD='change-me' wgflow web --listen :8080
 ```
+
+Basic Auth travels in cleartext — the panel itself does not do TLS. Keep it
+reachable only over WireGuard, an SSH tunnel, or a TLS-terminating reverse
+proxy; do not expose the bare port to the internet.
+
+Day buckets and minute timelines are aggregated in the timezone given by
+`--tz` (default `Europe/Moscow`). The UI currently formats times as MSK, so if
+you change `--tz`, expect the displayed clock labels to stay in MSK.
+
+## Development
+
+`go test ./...` runs the unit suite. The packet, DNS, TLS and QUIC parsers all
+take untrusted bytes, so they carry fuzz targets — exercise one with e.g.:
+
+```sh
+go test -fuzz=FuzzParsePacket -fuzztime=30s
+```
+
+For the UI, `pnpm --dir webui check` runs svelte-check alongside the build.
 
 ## Logs
 

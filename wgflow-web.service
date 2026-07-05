@@ -13,6 +13,22 @@ Restart=always
 RestartSec=3
 User=root
 NoNewPrivileges=true
+# Sandbox: the panel is read-only — it needs no capabilities and no write
+# access anywhere. Root uid is kept only so it can read the daemon's files;
+# the empty bounding set strips everything else.
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=multi-user.target
