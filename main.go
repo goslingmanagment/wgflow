@@ -63,6 +63,7 @@ type RuntimeStats struct {
 	CurrentFlowKeys            int       `json:"current_flow_keys"`
 	FlowQueueKeys              int       `json:"flow_queue_keys"`
 	RollupPendingRecords       uint64    `json:"rollup_pending_records"`
+	RollupDroppedRecords       uint64    `json:"rollup_dropped_records"`
 	ConfigPath                 string    `json:"config_path"`
 	ConfigReloads              uint64    `json:"config_reloads"`
 	ConfigLastLoadedAt         time.Time `json:"config_last_loaded_at"`
@@ -96,6 +97,7 @@ type StatsCollector struct {
 	lastFlushRecords   atomic.Uint64
 	currentFlowKeys    atomic.Uint64
 	rollupPending      atomic.Uint64
+	rollupDropped      atomic.Uint64
 	configReloads      atomic.Uint64
 	configLastLoadedNS atomic.Int64
 	configLastModNS    atomic.Int64
@@ -351,7 +353,17 @@ func serve(args []string) error {
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(fd)
+	// The capture goroutine blocks in Recvfrom with no way to interrupt it
+	// directly. Shutdown sets the flag and closes the fd; the goroutine treats
+	// any recv error while the flag is set as the exit signal, so it never
+	// spins on a closed (or worse, reused) descriptor.
+	var captureStopped atomic.Bool
+	var closeCaptureOnce sync.Once
+	closeCapture := func() {
+		captureStopped.Store(true)
+		closeCaptureOnce.Do(func() { syscall.Close(fd) })
+	}
+	defer closeCapture()
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
@@ -370,15 +382,26 @@ func serve(args []string) error {
 	defer pruneTicker.Stop()
 	var pendingRollup []FlowRecord
 
+	// Prune runs in its own goroutine: opening bbolt blocks on the file lock,
+	// and stalling the main select loop would delay flushes and even SIGTERM
+	// handling. One prune at a time; bbolt's flock serializes it against the
+	// flush-path openings, which already retry via pendingRollup.
+	var pruneRunning atomic.Bool
 	runPrune := func() {
 		if cfg.RollupRetention <= 0 {
 			return
 		}
-		if n, err := pruneRollup(cfg.RollupPath, time.Now().Add(-cfg.RollupRetention)); err != nil {
-			log.Printf("rollup prune failed: %v", err)
-		} else if n > 0 {
-			log.Printf("rollup prune: deleted %d keys older than %s", n, cfg.RollupRetention)
+		if !pruneRunning.CompareAndSwap(false, true) {
+			return
 		}
+		go func() {
+			defer pruneRunning.Store(false)
+			if n, err := pruneRollup(cfg.RollupPath, time.Now().Add(-cfg.RollupRetention)); err != nil {
+				log.Printf("rollup prune failed: %v", err)
+			} else if n > 0 {
+				log.Printf("rollup prune: deleted %d keys older than %s", n, cfg.RollupRetention)
+			}
+		}()
 	}
 	runPrune()
 
@@ -389,6 +412,9 @@ func serve(args []string) error {
 		for {
 			n, _, err := syscall.Recvfrom(fd, buf, 0)
 			if err != nil {
+				if captureStopped.Load() {
+					return
+				}
 				if errors.Is(err, syscall.EINTR) {
 					continue
 				}
@@ -476,6 +502,58 @@ func serve(args []string) error {
 		}
 	}()
 
+	flushFlows := func(now time.Time) {
+		flowMu.Lock()
+		batch := flows
+		flows = make(map[FlowKey]*FlowStats)
+		start := intervalStart
+		intervalStart = now
+		flowMu.Unlock()
+		records := make([]FlowRecord, 0, len(batch))
+		for _, st := range batch {
+			rec := FlowRecord{
+				TSStart: start, TSEnd: now, Interface: cfg.Iface,
+				Client: st.Client, ClientIP: st.ClientIP, RemoteIP: st.RemoteIP,
+				RemotePort: st.RemotePort, Proto: st.Proto,
+				Domain:            cache.Lookup(st.ClientIP, st.RemoteIP),
+				ClientUploadBytes: st.UploadBytes, ClientDownloadBytes: st.DownloadBytes,
+				ClientUploadPackets: st.UploadPackets, ClientDownloadPackets: st.DownloadPackets,
+			}
+			_ = flowLog.Write(rec)
+			records = append(records, rec)
+		}
+		if len(records) > 0 {
+			pendingRollup = append(pendingRollup, records...)
+		}
+		// If bbolt is permanently unavailable the retry queue must not grow
+		// without bound; drop the oldest records and account for the loss.
+		var dropped int
+		pendingRollup, dropped = capPendingRollup(pendingRollup, maxPendingRollupRecords)
+		if dropped > 0 {
+			stats.rollupDropped.Add(uint64(dropped))
+			log.Printf("rollup pending queue full; dropped %d oldest records", dropped)
+		}
+		if len(pendingRollup) > 0 {
+			if err := rollup.Add(pendingRollup); err != nil {
+				log.Printf("rollup write failed: %v pending_records=%d", err, len(pendingRollup))
+			} else {
+				pendingRollup = nil
+			}
+		}
+		stats.rollupPending.Store(uint64(len(pendingRollup)))
+		stats.flowRecords.Add(uint64(len(records)))
+		stats.lastFlushRecords.Store(uint64(len(records)))
+		stats.currentFlowKeys.Store(0)
+		stats.lastFlushNS.Store(now.UnixNano())
+		if pkts, drops, err := packetSocketStats(fd); err == nil {
+			prevDrops := stats.kernelDrops.Load()
+			stats.kernelPackets.Add(pkts)
+			stats.kernelDrops.Add(drops)
+			stats.lastDropsDelta.Store(stats.kernelDrops.Load() - prevDrops)
+		}
+		_ = stats.Write()
+	}
+
 	for {
 		select {
 		case sig := <-sigCh:
@@ -492,6 +570,11 @@ func serve(args []string) error {
 				continue
 			}
 			log.Printf("stopping on %s", sig)
+			// Stop capture first so the final flush sees a stable flows map,
+			// then write out everything accumulated since the last tick —
+			// otherwise up to a full flush interval of traffic is lost.
+			closeCapture()
+			flushFlows(time.Now())
 			return nil
 		case <-reloadTicker.C:
 			nextSig, err := fileSig(cfg.WGConfigPath)
@@ -511,47 +594,7 @@ func serve(args []string) error {
 				log.Printf("config changed; reloaded %s clients=%d", cfg.WGConfigPath, clients.Count())
 			}
 		case now := <-flushTicker.C:
-			flowMu.Lock()
-			batch := flows
-			flows = make(map[FlowKey]*FlowStats)
-			start := intervalStart
-			intervalStart = now
-			flowMu.Unlock()
-			records := make([]FlowRecord, 0, len(batch))
-			for _, st := range batch {
-				rec := FlowRecord{
-					TSStart: start, TSEnd: now, Interface: cfg.Iface,
-					Client: st.Client, ClientIP: st.ClientIP, RemoteIP: st.RemoteIP,
-					RemotePort: st.RemotePort, Proto: st.Proto,
-					Domain:            cache.Lookup(st.ClientIP, st.RemoteIP),
-					ClientUploadBytes: st.UploadBytes, ClientDownloadBytes: st.DownloadBytes,
-					ClientUploadPackets: st.UploadPackets, ClientDownloadPackets: st.DownloadPackets,
-				}
-				_ = flowLog.Write(rec)
-				records = append(records, rec)
-			}
-			if len(records) > 0 {
-				pendingRollup = append(pendingRollup, records...)
-			}
-			if len(pendingRollup) > 0 {
-				if err := rollup.Add(pendingRollup); err != nil {
-					log.Printf("rollup write failed: %v pending_records=%d", err, len(pendingRollup))
-				} else {
-					pendingRollup = nil
-				}
-			}
-			stats.rollupPending.Store(uint64(len(pendingRollup)))
-			stats.flowRecords.Add(uint64(len(records)))
-			stats.lastFlushRecords.Store(uint64(len(records)))
-			stats.currentFlowKeys.Store(0)
-			stats.lastFlushNS.Store(now.UnixNano())
-			if pkts, drops, err := packetSocketStats(fd); err == nil {
-				prevDrops := stats.kernelDrops.Load()
-				stats.kernelPackets.Add(pkts)
-				stats.kernelDrops.Add(drops)
-				stats.lastDropsDelta.Store(stats.kernelDrops.Load() - prevDrops)
-			}
-			_ = stats.Write()
+			flushFlows(now)
 		case <-statsTicker.C:
 			flowMu.Lock()
 			stats.currentFlowKeys.Store(uint64(len(flows)))
@@ -1195,11 +1238,32 @@ func (r *RollupStore) Close() error {
 	return nil
 }
 
+// maxPendingRollupRecords caps the in-memory retry queue for rollup writes.
+// At the default 30s flush interval this is hours of failed flushes; past
+// that, dropping the oldest records beats growing until the OOM killer fires.
+const maxPendingRollupRecords = 200_000
+
+// capPendingRollup drops the oldest records once the retry queue exceeds max.
+// It copies the kept tail into a fresh slice so the dropped prefix does not
+// pin the old backing array.
+func capPendingRollup(pending []FlowRecord, max int) ([]FlowRecord, int) {
+	if len(pending) <= max {
+		return pending, 0
+	}
+	dropped := len(pending) - max
+	kept := make([]FlowRecord, max)
+	copy(kept, pending[dropped:])
+	return kept, dropped
+}
+
 func (r *RollupStore) Add(records []FlowRecord) error {
 	if r == nil || r.path == "" || len(records) == 0 {
 		return nil
 	}
-	db, err := bolt.Open(r.path, 0644, &bolt.Options{Timeout: 30 * time.Second})
+	// Keep the lock wait short: Add runs on the flush path, and a stuck or
+	// slow holder of the bbolt flock must not stall the daemon for long —
+	// failed batches are retried from pendingRollup on the next flush.
+	db, err := bolt.Open(r.path, 0644, &bolt.Options{Timeout: 5 * time.Second})
 	if err != nil {
 		return err
 	}
@@ -1555,6 +1619,7 @@ func (s *StatsCollector) Snapshot() RuntimeStats {
 		CurrentFlowKeys:            flowKeys,
 		FlowQueueKeys:              flowKeys,
 		RollupPendingRecords:       s.rollupPending.Load(),
+		RollupDroppedRecords:       s.rollupDropped.Load(),
 		ConfigPath:                 s.configPath,
 		ConfigReloads:              s.configReloads.Load(),
 		ConfigLastLoadedAt:         time.Unix(0, s.configLastLoadedNS.Load()),
