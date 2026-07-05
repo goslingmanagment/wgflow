@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net/netip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -149,6 +150,58 @@ func TestEnrichTargetFallsBackToOrgTable(t *testing.T) {
 	}
 	if _, org := enrichTarget("198.51.100.99", "", "udp", 4500); org != "" {
 		t.Errorf("unknown IP must keep an empty org, got %q", org)
+	}
+}
+
+// fakeIPOrgResolver stands in for the optional ASN .mmdb (generating a real
+// micro-mmdb needs external tooling); the chain around it is what matters.
+type fakeIPOrgResolver struct {
+	answers map[string]string
+	calls   int
+}
+
+func (f *fakeIPOrgResolver) OrgForIP(addr netip.Addr) string {
+	f.calls++
+	return f.answers[addr.String()]
+}
+
+func TestOrgChainPrefersBuiltinTableOverASNDB(t *testing.T) {
+	defer setIPOrgResolver(nil)
+	fake := &fakeIPOrgResolver{answers: map[string]string{
+		"198.51.100.7":   "ExampleNet Ltd",
+		"149.154.167.99": "WRONG-SHOULD-NOT-BE-ASKED",
+	}}
+	setIPOrgResolver(fake)
+
+	// Builtin table wins; the ASN DB must not even be consulted.
+	if org := orgForIPEnriched("149.154.167.99"); org != "Telegram" {
+		t.Errorf("builtin hit = %q, want Telegram", org)
+	}
+	if fake.calls != 0 {
+		t.Errorf("ASN DB consulted %d times on a builtin hit, want 0", fake.calls)
+	}
+	// Builtin miss falls through to the ASN DB.
+	if org := orgForIPEnriched("198.51.100.7"); org != "ExampleNet Ltd" {
+		t.Errorf("asn fallback = %q, want ExampleNet Ltd", org)
+	}
+	// Miss in both stays empty; garbage input never reaches the resolver.
+	if org := orgForIPEnriched("203.0.113.200"); org != "" {
+		t.Errorf("double miss = %q, want empty", org)
+	}
+	calls := fake.calls
+	if org := orgForIPEnriched("not-an-ip"); org != "" || fake.calls != calls {
+		t.Errorf("garbage input = %q (resolver calls %d -> %d)", org, calls, fake.calls)
+	}
+
+	// End to end through enrichTarget (non-443 port skips the PTR path).
+	if resolved, org := enrichTarget("198.51.100.7", "", "udp", 2408); resolved != "" || org != "ExampleNet Ltd" {
+		t.Errorf("enrichTarget via ASN DB = (%q, %q)", resolved, org)
+	}
+
+	// Without a resolver installed the chain degrades to the builtin table.
+	setIPOrgResolver(nil)
+	if org := orgForIPEnriched("198.51.100.7"); org != "" {
+		t.Errorf("no resolver = %q, want empty", org)
 	}
 }
 

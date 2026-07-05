@@ -81,6 +81,21 @@ Day buckets and minute timelines are aggregated in the timezone given by
 `--tz` (default `Europe/Moscow`). The UI currently formats times as MSK, so if
 you change `--tz`, expect the displayed clock labels to stay in MSK.
 
+Bare-IP targets (nested tunnels, QUIC without SNI) are attributed to their
+network owner via a small builtin prefix table. To name networks the table
+does not know, point `--asn-db` at any MaxMind-format ASN database — the free
+db-ip ASN Lite works without registration (CC-BY): download
+`dbip-asn-lite-YYYY-MM.mmdb.gz` from <https://download.db-ip.com/free/>,
+gunzip it, and pass the path:
+
+```sh
+wgflow web --listen :8080 --asn-db /var/lib/wgflow/dbip-asn-lite.mmdb
+```
+
+The database is consulted only after the builtin table misses, only in the web
+layer (never on the capture path). A missing or corrupt file logs a warning
+and the panel runs without it.
+
 ## Development
 
 `go test ./...` runs the unit suite. The packet, DNS, TLS and QUIC parsers all

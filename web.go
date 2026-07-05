@@ -13,6 +13,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oschwald/maxminddb-golang"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -122,6 +124,7 @@ func webCmd(args []string) error {
 	wgConfig := fset.String("wg-config", "/etc/wireguard/wg0.conf", "WireGuard config path")
 	iface := fset.String("iface", "wg0", "interface label")
 	clientsConfig := fset.String("clients-config", "/etc/wgflow/clients.yaml", "client alias config for person grouping (optional)")
+	asnDBPath := fset.String("asn-db", "", "ASN .mmdb database (db-ip ASN Lite / GeoLite2-ASN) used to name IP owners the builtin table misses (optional)")
 	authPassword := fset.String("auth-password", os.Getenv("WGFLOW_WEB_PASSWORD"), "HTTP Basic Auth password; defaults to WGFLOW_WEB_PASSWORD")
 	authRealm := fset.String("auth-realm", "wgflow", "HTTP Basic Auth realm")
 	allowNoAuth := fset.Bool("allow-no-auth", false, "serve without a password even on a non-loopback address (dangerous: the whole household's traffic becomes public)")
@@ -150,6 +153,16 @@ func webCmd(args []string) error {
 	aliases, err := loadAliasConfig(*clientsConfig)
 	if err != nil {
 		return fmt.Errorf("clients-config %s: %w", *clientsConfig, err)
+	}
+	// A missing or broken ASN DB is a warning, not a startup failure: the panel
+	// still works, targets just fall back to the builtin prefix table.
+	if *asnDBPath != "" {
+		if asn, err := openASNDB(*asnDBPath); err != nil {
+			log.Printf("WARNING: asn-db %s unusable, continuing without it: %v", *asnDBPath, err)
+		} else {
+			setIPOrgResolver(asn)
+			log.Printf("asn-db=%s loaded", *asnDBPath)
+		}
 	}
 	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases, loc: loc}
 	log.Printf("clients-config=%s people=%d devices=%d", *clientsConfig, len(aliases.people), len(aliases.roster))
@@ -240,6 +253,39 @@ func basicAuthHandler(next http.Handler, password, realm string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// asnDB adapts a MaxMind-format ASN database (db-ip ASN Lite, GeoLite2-ASN)
+// to the ipOrgResolver hook consulted after the builtin prefix table. Loaded
+// once at startup from -asn-db; lookups are read-only and goroutine-safe.
+type asnDB struct {
+	reader *maxminddb.Reader
+}
+
+func openASNDB(path string) (*asnDB, error) {
+	r, err := maxminddb.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	return &asnDB{reader: r}, nil
+}
+
+func (a *asnDB) OrgForIP(addr netip.Addr) string {
+	var rec struct {
+		Org string `maxminddb:"autonomous_system_organization"`
+		ASN uint   `maxminddb:"autonomous_system_number"`
+	}
+	if err := a.reader.Lookup(net.IP(addr.AsSlice()), &rec); err != nil {
+		return ""
+	}
+	if rec.Org != "" {
+		return rec.Org
+	}
+	if rec.ASN != 0 {
+		// A number with no name is still better than an anonymous IP.
+		return fmt.Sprintf("AS%d", rec.ASN)
+	}
+	return ""
 }
 
 func (s *webServer) staticHandler() http.Handler {

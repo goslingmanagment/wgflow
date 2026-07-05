@@ -93,7 +93,9 @@ var orgPrefixes = []struct {
 
 // orgForIP names the organization operating ip's network, or "" when the IP is
 // not in the builtin table. One linear pass over ~50 prefixes, no allocations;
-// the longest (most specific) matching prefix wins.
+// the longest (most specific) matching prefix wins. Deliberately builtin-only:
+// categorize calls this on the capture path, where an mmdb lookup per flow
+// would be an unbounded new cost.
 func orgForIP(ip string) string {
 	addr, err := netip.ParseAddr(ip)
 	if err != nil {
@@ -109,6 +111,35 @@ func orgForIP(ip string) string {
 		}
 	}
 	return org
+}
+
+// ipOrgResolver names the organization behind an IP from an external source
+// (an ASN database). It is only consulted after the builtin prefix table
+// misses, and only on the enrich chain (web/report layer) — never per packet.
+type ipOrgResolver interface {
+	OrgForIP(addr netip.Addr) string
+}
+
+// ipOrgFallback is installed once at startup (see the web command's -asn-db
+// flag) before any requests are served; nil means builtin table only.
+var ipOrgFallback ipOrgResolver
+
+func setIPOrgResolver(r ipOrgResolver) { ipOrgFallback = r }
+
+// orgForIPEnriched is the full org chain: builtin prefix table first, then the
+// optional ASN database.
+func orgForIPEnriched(ip string) string {
+	if org := orgForIP(ip); org != "" {
+		return org
+	}
+	if ipOrgFallback == nil {
+		return ""
+	}
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ""
+	}
+	return ipOrgFallback.OrgForIP(addr.Unmap())
 }
 
 func categorize(target, remoteIP, proto string, port uint16) string {
@@ -270,9 +301,9 @@ func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, 
 		}
 	}
 	// No PTR and no hand-curated match: fall back to the network-owner table
-	// (Telegram/Cloudflare/Hetzner/...), so nested tunnels and QUIC-without-SNI
-	// at least say whose backbone they talk to.
-	if org := orgForIP(ip); org != "" {
+	// (Telegram/Cloudflare/Hetzner/...), then the optional ASN database, so
+	// nested tunnels and QUIC-without-SNI at least say whose backbone they use.
+	if org := orgForIPEnriched(ip); org != "" {
 		return "", org
 	}
 	if proto == "tcp" && port == 12324 {
@@ -282,12 +313,12 @@ func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, 
 }
 
 // orgOrIPFallback keeps a name-derived org when there is one and otherwise
-// falls back to the network-owner table for the IP.
+// falls back to the network-owner chain (builtin table, then ASN DB).
 func orgOrIPFallback(org, ip string) string {
 	if org != "" {
 		return org
 	}
-	return orgForIP(ip)
+	return orgForIPEnriched(ip)
 }
 
 type reverseDNSResult struct {
