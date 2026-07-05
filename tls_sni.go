@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"strings"
 	"sync"
@@ -328,6 +329,161 @@ func (r *tlsReassembler) Size() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.flows)
+}
+
+// Plaintext HTTP Host extraction. Production still moves ~0.7 GB on tcp/80
+// with the hostname sitting in cleartext; a request's Host header names those
+// flows for free. Records go to the tls log with protocol "http" (the field's
+// third value, agreed with the UI), so the existing site views pick them up.
+
+// httpHeaderScanLimit bounds how far into a payload we look for the Host
+// header. It lives in the first ~hundred bytes of real requests; scanning a
+// whole 64 KB GSO buffer would be wasted work on garbage.
+const httpHeaderScanLimit = 2048
+
+var httpMethods = [][]byte{
+	[]byte("GET "), []byte("POST "), []byte("HEAD "), []byte("PUT "),
+	[]byte("DELETE "), []byte("OPTIONS "), []byte("PATCH "),
+	[]byte("CONNECT "), []byte("TRACE "),
+}
+
+var httpVersionMark = []byte(" HTTP/1.")
+
+// parseHTTPHost pulls the Host header from the first packet of a plaintext
+// HTTP request. No cross-segment reassembly: Host is practically always in
+// the first segment, and a miss only costs a label. Runs on every outbound
+// tcp/80 payload, so the negative path must not allocate.
+func parseHTTPHost(payload []byte) string {
+	if len(payload) > httpHeaderScanLimit {
+		payload = payload[:httpHeaderScanLimit]
+	}
+	method := false
+	for _, m := range httpMethods {
+		if bytes.HasPrefix(payload, m) {
+			method = true
+			break
+		}
+	}
+	if !method {
+		return ""
+	}
+	// Require a real request line before trusting header parsing: random
+	// binary payloads occasionally start with method-like bytes.
+	lineEnd := indexCRLF(payload, 0)
+	if lineEnd < 0 || !bytes.Contains(payload[:lineEnd], httpVersionMark) {
+		return ""
+	}
+	for pos := lineEnd + 2; pos < len(payload); {
+		end := indexCRLF(payload, pos)
+		if end < 0 {
+			return ""
+		}
+		if end == pos {
+			return "" // blank line: headers over, no Host seen
+		}
+		line := payload[pos:end]
+		pos = end + 2
+		if !hasHostPrefix(line) {
+			continue
+		}
+		host := strings.TrimSpace(string(line[5:]))
+		if host == "" || host[0] == '[' {
+			return "" // bracketed IPv6 literal is never a hostname
+		}
+		// Strip an explicit port (Host: example.com:8080).
+		if i := strings.LastIndexByte(host, ':'); i >= 0 {
+			port := host[i+1:]
+			if port == "" || !allDigits(port) {
+				return ""
+			}
+			host = host[:i]
+		}
+		host = strings.ToLower(host)
+		if validHostname(host) {
+			return host
+		}
+		return ""
+	}
+	return ""
+}
+
+// indexCRLF finds the next CRLF at or after pos.
+func indexCRLF(b []byte, pos int) int {
+	for i := pos; i+1 < len(b); i++ {
+		if b[i] == '\r' && b[i+1] == '\n' {
+			return i
+		}
+	}
+	return -1
+}
+
+// hasHostPrefix reports whether the header line starts with "host:" in any
+// case, without converting to string (this runs per header line of every
+// plaintext request).
+func hasHostPrefix(line []byte) bool {
+	return len(line) >= 5 &&
+		line[0]|0x20 == 'h' && line[1]|0x20 == 'o' &&
+		line[2]|0x20 == 's' && line[3]|0x20 == 't' && line[4] == ':'
+}
+
+func allDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// httpHostDeduper rate-limits http host records to one per flow key per
+// minute: unlike TLS (one ClientHello per connection), a keep-alive HTTP
+// connection repeats the Host header on every request.
+const (
+	httpLogInterval  = time.Minute
+	httpDedupMaxKeys = 4096
+)
+
+type httpHostDeduper struct {
+	mu   sync.Mutex
+	seen map[tcpFlowKey]time.Time // last time a record was written
+}
+
+func newHTTPHostDeduper() *httpHostDeduper {
+	return &httpHostDeduper{seen: map[tcpFlowKey]time.Time{}}
+}
+
+func (d *httpHostDeduper) Allow(key tcpFlowKey, now time.Time) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if last, ok := d.seen[key]; ok && now.Sub(last) < httpLogInterval {
+		return false
+	}
+	if len(d.seen) >= httpDedupMaxKeys {
+		for k, last := range d.seen {
+			if now.Sub(last) >= httpLogInterval {
+				delete(d.seen, k)
+			}
+		}
+		for k := range d.seen {
+			if len(d.seen) < httpDedupMaxKeys {
+				break
+			}
+			delete(d.seen, k)
+		}
+	}
+	d.seen[key] = now
+	return true
+}
+
+// Prune drops stale keys so an idle capture does not pin dead flows.
+func (d *httpHostDeduper) Prune(now time.Time) {
+	d.mu.Lock()
+	for k, last := range d.seen {
+		if now.Sub(last) >= httpLogInterval {
+			delete(d.seen, k)
+		}
+	}
+	d.mu.Unlock()
 }
 
 func validHostname(s string) bool {

@@ -197,6 +197,71 @@ func TestTLSReassemblyFlowCapEviction(t *testing.T) {
 	}
 }
 
+func TestParseHTTPHost(t *testing.T) {
+	cases := []struct {
+		name    string
+		payload string
+		want    string
+	}{
+		{"simple GET", "GET /index.html HTTP/1.1\r\nHost: example.com\r\nUser-Agent: curl\r\n\r\n", "example.com"},
+		{"host with port stripped", "GET / HTTP/1.1\r\nHost: api.example.com:8080\r\n\r\n", "api.example.com"},
+		{"lowercase header name", "POST /submit HTTP/1.0\r\nhost: upload.example.org\r\n\r\n", "upload.example.org"},
+		{"uppercased value lowered", "GET / HTTP/1.1\r\nHost: CDN.Example.COM\r\n\r\n", "cdn.example.com"},
+		{"host not first header", "GET / HTTP/1.1\r\nAccept: */*\r\nHost: two.example.com\r\n\r\n", "two.example.com"},
+		{"no host header", "GET / HTTP/1.1\r\nAccept: */*\r\n\r\n", ""},
+		{"not http at all", "\x16\x03\x01\x00\x50garbagegarbage", ""},
+		{"method but no version", "GET some random bytes without crlf", ""},
+		{"method without http marker", "GET /path FTP/9\r\nHost: example.com\r\n\r\n", ""},
+		{"empty payload", "", ""},
+		{"host without dot rejected", "GET / HTTP/1.1\r\nHost: localhost\r\n\r\n", ""},
+		{"host with slash rejected", "GET / HTTP/1.1\r\nHost: bad/host.example.com\r\n\r\n", ""},
+		{"ipv6 literal rejected", "GET / HTTP/1.1\r\nHost: [2001:db8::1]:8080\r\n\r\n", ""},
+		{"non-numeric port rejected", "GET / HTTP/1.1\r\nHost: example.com:8o8o\r\n\r\n", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := parseHTTPHost([]byte(tc.payload)); got != tc.want {
+				t.Fatalf("parseHTTPHost = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestHTTPHostDeduperRateLimits(t *testing.T) {
+	d := newHTTPHostDeduper()
+	key := tcpFlowKey{clientIP: "10.66.66.2", remoteIP: "192.0.2.1", clientPort: 50100, remotePort: 80}
+	now := time.Now()
+	if !d.Allow(key, now) {
+		t.Fatal("first record must pass")
+	}
+	if d.Allow(key, now.Add(10*time.Second)) {
+		t.Fatal("second record within a minute must be suppressed")
+	}
+	if !d.Allow(key, now.Add(httpLogInterval+time.Second)) {
+		t.Fatal("record after the interval must pass")
+	}
+	other := key
+	other.clientPort = 50101
+	if !d.Allow(other, now) {
+		t.Fatal("different flow key must not be affected")
+	}
+}
+
+func TestHTTPHostDeduperCap(t *testing.T) {
+	d := newHTTPHostDeduper()
+	now := time.Now()
+	for i := 0; i < httpDedupMaxKeys+16; i++ {
+		key := tcpFlowKey{clientIP: "10.66.66.2", remoteIP: "192.0.2.1", clientPort: uint16(i), remotePort: 80}
+		d.Allow(key, now)
+	}
+	d.mu.Lock()
+	n := len(d.seen)
+	d.mu.Unlock()
+	if n > httpDedupMaxKeys {
+		t.Fatalf("dedup map exceeded cap: %d > %d", n, httpDedupMaxKeys)
+	}
+}
+
 func TestTLSReassemblyTTLExpiry(t *testing.T) {
 	record, _ := testTLSClientHelloPadded("pq.example.com", 1700)
 	r := newTLSReassembler()

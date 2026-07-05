@@ -194,6 +194,7 @@ func serve(args []string) error {
 	}
 	tlsAsm := newTLSReassembler()
 	quicAsm := newQUICReassembler()
+	httpDedup := newHTTPHostDeduper()
 	flows := make(map[FlowKey]*FlowStats)
 	var flowMu sync.Mutex
 	intervalStart := time.Now()
@@ -336,6 +337,22 @@ func serve(args []string) error {
 					stats.tlsRecords.Add(1)
 				}
 			}
+			if outbound && pkt.Proto == 6 && pkt.DstPort == 80 && len(pkt.TransportPayload) > 0 {
+				if host := parseHTTPHost(pkt.TransportPayload); host != "" {
+					key := tcpFlowKey{clientIP: clientIP, remoteIP: remoteIP, clientPort: pkt.SrcPort, remotePort: pkt.DstPort}
+					// One record per flow per minute: keep-alive connections
+					// repeat Host on every request, unlike a TLS ClientHello.
+					if httpDedup.Allow(key, time.Now()) {
+						cache.Put(clientIP, remoteIP, host, 3600)
+						_ = tlsLog.Write(TLSRecord{
+							TS: time.Now(), Interface: cfg.Iface, Client: clientName,
+							ClientIP: clientIP, RemoteIP: remoteIP, RemotePort: pkt.DstPort,
+							ServerName: host, Protocol: "http",
+						})
+						stats.tlsRecords.Add(1)
+					}
+				}
+			}
 			if outbound && pkt.Proto == 17 && pkt.DstPort == 443 {
 				if sni, _ := parseQUICSNIAsm(pkt.TransportPayload, quicAsm, time.Now()); sni != "" {
 					cache.Put(clientIP, remoteIP, sni, 3600)
@@ -451,6 +468,7 @@ func serve(args []string) error {
 			flowMu.Unlock()
 			tlsAsm.Prune(time.Now())
 			quicAsm.Prune(time.Now())
+			httpDedup.Prune(time.Now())
 			_ = stats.Write()
 		case <-pruneTicker.C:
 			runPrune()
