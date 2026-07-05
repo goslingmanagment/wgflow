@@ -32,15 +32,27 @@
   function parse() {
     const h = location.hash.replace(/^#\/?/, '') || 'clients'
     const [name, param] = h.split('/')
-    return { name, param: param ? decodeURIComponent(param) : '' }
+    if (!param) return { name, param: '' }
+    try {
+      return { name, param: decodeURIComponent(param) }
+    } catch {
+      // Malformed percent-encoding (#/clients/%zz) must not crash the mount —
+      // fall back to the default route.
+      return { name: 'clients', param: '' }
+    }
   }
 
   const Current = $derived(route.name === 'clients' && route.param ? ClientDetail : ROUTES[route.name] || Clients)
-  const activeNav = $derived(route.name === 'clients' && route.param ? 'clients' : route.name)
+  // Unknown routes render Clients, so highlight the Clients tab for them too.
+  const activeNav = $derived(route.name === 'clients' && route.param ? 'clients' : ROUTES[route.name] ? route.name : 'clients')
 
   let now = $state(new Date())
   onMount(() => {
-    const onHash = () => (route = parse())
+    const onHash = () => {
+      route = parse()
+      // A route change is a page change — don't inherit the old scroll depth.
+      scrollTo(0, 0)
+    }
     addEventListener('hashchange', onHash)
     const onVisible = () => {
       if (document.visibilityState === 'visible' && ui.autoRefresh) requestRefresh()
@@ -97,7 +109,12 @@
       </div>
     </header>
     <main class="main">
-      <Current param={route.param} />
+      <!-- Keyed on param so back/forward between #/clients/A and #/clients/B
+           remounts ClientDetail (fresh data/anchor, and the Ribbon's per-minute
+           cache can't leak client A's domains into client B). -->
+      {#key route.param}
+        <Current param={route.param} />
+      {/key}
     </main>
   </div>
 </div>

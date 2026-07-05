@@ -8,7 +8,9 @@
   // exact string, and copies that exact string — so the screen and the clipboard
   // can never disagree, and the honesty caveat always travels inside the copied
   // text. Verdicts are refused-as-confident when logger_ok is false.
-  let { open = false, onClose = () => {}, names = [] } = $props()
+  // `names` is a comma-joined string (not an array) so an unchanged client list
+  // compares equal across refresh ticks and doesn't refire the load effect.
+  let { open = false, onClose = () => {}, names = '' } = $props()
 
   let win = $state('5m')
   let copied = $state(false)
@@ -24,7 +26,7 @@
   $effect(() => {
     trackRefreshTick()
     const w = win
-    const n = names.join(',')
+    const n = names
     if (open) load(w, n)
   })
 
@@ -145,7 +147,7 @@
     <header>
       <div class="title serif">Срез <span>· последние {win}</span></div>
       <div class="acts">
-        <button class="ic" title="Обновить" onclick={() => load(win, names.join(','))} aria-label="Обновить">↻</button>
+        <button class="ic" title="Обновить" onclick={() => load(win, names)} aria-label="Обновить">↻</button>
         <button class="copy" class:done={copied} onclick={copy} disabled={!text}>{copied ? 'скопировано' : 'copy'}</button>
         <button class="ic" title="Закрыть" onclick={onClose} aria-label="Закрыть">✕</button>
       </div>
