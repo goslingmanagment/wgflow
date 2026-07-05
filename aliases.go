@@ -29,6 +29,10 @@ type clientsConfigFile struct {
 		Devices []string `yaml:"devices"`
 	} `yaml:"people"`
 	DeviceKind map[string]string `yaml:"device_kind"`
+	// TargetNames maps an exact IP (or a prefix ending with '.') to the
+	// hostname enrichTarget should display for it. Merged on top of the
+	// builtin table; an empty value removes a builtin entry.
+	TargetNames map[string]string `yaml:"target_names"`
 }
 
 // loadAliasConfig reads clients.yaml. A missing file is NOT an error — aliases are
@@ -37,6 +41,7 @@ func loadAliasConfig(path string) (*AliasConfig, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
+			setTargetNameOverrides(nil) // no config -> builtin target names only
 			return &AliasConfig{}, nil
 		}
 		return nil, err
@@ -73,6 +78,10 @@ func loadAliasConfig(path string) (*AliasConfig, error) {
 			ac.kindByDevice[strings.TrimSpace(dev)] = strings.ToLower(strings.TrimSpace(kind))
 		}
 	}
+	// Target names feed enrichTarget, whose signature is shared with the web
+	// UI, so the merged table is installed process-wide rather than threaded
+	// through every caller.
+	setTargetNameOverrides(f.TargetNames)
 	return ac, nil
 }
 

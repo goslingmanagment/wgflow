@@ -20,3 +20,11 @@ people:
 # Override the phone/laptop guess for peers the name suffix gets wrong.
 device_kind:
   mom-macbook: laptop
+
+# Optional: name bare IP targets in top/report and the web UI. Entries are
+# merged on top of the builtin table (CloudFront edges etc.). A key is either
+# an exact IP or a prefix ending with "." (longest prefix wins); an empty
+# value removes a builtin entry.
+target_names:
+  "18.244.100.10": server-18-244-100-10.fra60.r.cloudfront.net
+  "203.0.113.": my-own-edge.example.net

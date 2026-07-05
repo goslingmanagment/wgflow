@@ -1099,6 +1099,71 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 	}
 }
 
+// builtinTargetNames is the default IP -> display-hostname table used by
+// enrichTarget (mostly CloudFront edges seen from this deployment). Keys are
+// exact IPs or prefixes (trailing '.'). clients.yaml `target_names:` entries
+// are merged on top — CDN edges rotate faster than this binary ships.
+var builtinTargetNames = map[string]string{
+	"3.173.161.68":  "server-3-173-161-68.ams56.r.cloudfront.net",
+	"3.173.161.31":  "server-3-173-161-31.ams56.r.cloudfront.net",
+	"3.173.161.86":  "server-3-173-161-86.ams56.r.cloudfront.net",
+	"3.171.214.100": "server-3-171-214-100.fra50.r.cloudfront.net",
+	"3.171.214.77":  "server-3-171-214-77.fra50.r.cloudfront.net",
+	"18.239.36.50":  "server-18-239-36-50.ams58.r.cloudfront.net",
+	"18.239.36.56":  "server-18-239-36-56.ams58.r.cloudfront.net",
+	"99.86.12.89":   "server-99-86-12-89.ams54.r.cloudfront.net",
+}
+
+// activeTargetNames is the merged builtin+override view, swapped atomically
+// under the mutex because loadAliasConfig may install overrides while other
+// goroutines resolve names.
+var targetNamesMu sync.RWMutex
+var activeTargetNames = builtinTargetNames
+
+// setTargetNameOverrides merges clients.yaml target_names on top of the
+// builtin table. An empty value removes a builtin entry; nil restores pure
+// defaults.
+func setTargetNameOverrides(overrides map[string]string) {
+	merged := make(map[string]string, len(builtinTargetNames)+len(overrides))
+	for k, v := range builtinTargetNames {
+		merged[k] = v
+	}
+	for k, v := range overrides {
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" {
+			continue
+		}
+		if v == "" {
+			delete(merged, k)
+			continue
+		}
+		merged[k] = v
+	}
+	targetNamesMu.Lock()
+	activeTargetNames = merged
+	targetNamesMu.Unlock()
+}
+
+// lookupTargetName resolves an IP against the merged table: exact key first,
+// then the longest matching prefix key (keys ending with '.').
+func lookupTargetName(ip string) (string, bool) {
+	targetNamesMu.RLock()
+	table := activeTargetNames
+	targetNamesMu.RUnlock()
+	if name, ok := table[ip]; ok {
+		return name, true
+	}
+	bestLen := 0
+	bestName := ""
+	for k, v := range table {
+		if strings.HasSuffix(k, ".") && strings.HasPrefix(ip, k) && len(k) > bestLen {
+			bestLen, bestName = len(k), v
+		}
+	}
+	return bestName, bestLen > 0
+}
+
 func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, targetOrg string) {
 	ip := target
 	if net.ParseIP(ip) == nil {
@@ -1106,6 +1171,11 @@ func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, 
 	}
 	if net.ParseIP(ip) == nil {
 		return "", ""
+	}
+	// The configurable table wins over the coded heuristics below so an
+	// operator can correct or extend attribution without a rebuild.
+	if name, ok := lookupTargetName(ip); ok {
+		return name, orgForTargetName(name)
 	}
 	switch {
 	case strings.HasPrefix(ip, "37.140.178."):
@@ -1116,22 +1186,6 @@ func enrichTarget(target, remoteIP, proto string, port uint16) (resolvedTarget, 
 		if octet, ok := suffixIPv4Octet(ip, "5.255.221."); ok {
 			return "s" + octet + "klg.storage.yandex.net", "Yandex Storage"
 		}
-	case ip == "3.173.161.68":
-		return "server-3-173-161-68.ams56.r.cloudfront.net", "Amazon CloudFront"
-	case ip == "3.173.161.31":
-		return "server-3-173-161-31.ams56.r.cloudfront.net", "Amazon CloudFront"
-	case ip == "3.173.161.86":
-		return "server-3-173-161-86.ams56.r.cloudfront.net", "Amazon CloudFront"
-	case ip == "3.171.214.100":
-		return "server-3-171-214-100.fra50.r.cloudfront.net", "Amazon CloudFront"
-	case ip == "3.171.214.77":
-		return "server-3-171-214-77.fra50.r.cloudfront.net", "Amazon CloudFront"
-	case ip == "18.239.36.50":
-		return "server-18-239-36-50.ams58.r.cloudfront.net", "Amazon CloudFront"
-	case ip == "18.239.36.56":
-		return "server-18-239-36-56.ams58.r.cloudfront.net", "Amazon CloudFront"
-	case ip == "99.86.12.89":
-		return "server-99-86-12-89.ams54.r.cloudfront.net", "Amazon CloudFront"
 	case strings.HasPrefix(ip, "71.18.251."):
 		return "", "ByteDance/TikTok edge"
 	case ipPrefix(ip, "149.154.", "91.108.", "91.105."):
