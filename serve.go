@@ -175,6 +175,23 @@ func serve(args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	cache := NewDomainCache()
+	domainCachePath := filepath.Join(cfg.LogDir, "domains.cache.json")
+	// Restore IP->domain mappings from the previous run: connections opened
+	// before the restart never resend a ClientHello or DNS query, so without
+	// this their flows would stay nameless. Failure is never fatal — a
+	// missing file is simply the first start.
+	if n, err := cache.LoadFrom(domainCachePath); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("domain cache load failed: %v", err)
+		}
+	} else {
+		log.Printf("domain cache restored entries=%d from %s", n, domainCachePath)
+	}
+	saveDomainCache := func() {
+		if err := cache.SaveTo(domainCachePath); err != nil {
+			log.Printf("domain cache save failed: %v", err)
+		}
+	}
 	tlsAsm := newTLSReassembler()
 	quicAsm := newQUICReassembler()
 	flows := make(map[FlowKey]*FlowStats)
@@ -188,6 +205,8 @@ func serve(args []string) error {
 	defer statsTicker.Stop()
 	pruneTicker := time.NewTicker(24 * time.Hour)
 	defer pruneTicker.Stop()
+	domainSaveTicker := time.NewTicker(5 * time.Minute)
+	defer domainSaveTicker.Stop()
 	var pendingRollup []FlowRecord
 
 	// Prune runs in its own goroutine: opening bbolt blocks on the file lock,
@@ -405,6 +424,7 @@ func serve(args []string) error {
 			// otherwise up to a full flush interval of traffic is lost.
 			closeCapture()
 			flushFlows(time.Now())
+			saveDomainCache()
 			return nil
 		case <-reloadTicker.C:
 			nextSig, err := fileSig(cfg.WGConfigPath)
@@ -434,6 +454,8 @@ func serve(args []string) error {
 			_ = stats.Write()
 		case <-pruneTicker.C:
 			runPrune()
+		case <-domainSaveTicker.C:
+			saveDomainCache()
 		}
 	}
 }
@@ -522,6 +544,101 @@ func evictDomainEntries(m map[string]domainEntry, max int, now time.Time) {
 		}
 		delete(m, k)
 	}
+}
+
+// Domain cache persistence. The cache used to die with the process, so after
+// every restart all established connections (which never resend a
+// ClientHello) went nameless until their next DNS lookup. A periodic snapshot
+// survives restarts; losing one save interval costs only a few labels.
+
+// domainCacheFileVersion guards the on-disk format; bump on breaking changes
+// so an old binary never misreads a new file (and vice versa).
+const domainCacheFileVersion = 1
+
+type domainCacheFileEntry struct {
+	Domain  string    `json:"domain"`
+	Expires time.Time `json:"expires"`
+}
+
+type domainCacheFile struct {
+	Version    int                             `json:"version"`
+	SavedAt    time.Time                       `json:"saved_at"`
+	ByClientIP map[string]domainCacheFileEntry `json:"by_client_ip"`
+	ByIP       map[string]domainCacheFileEntry `json:"by_ip"`
+}
+
+// SaveTo atomically dumps all non-expired entries (tmp + rename, same
+// protocol as stats.json) so a crash mid-write never corrupts the file.
+func (d *DomainCache) SaveTo(path string) error {
+	now := time.Now()
+	dump := domainCacheFile{
+		Version:    domainCacheFileVersion,
+		SavedAt:    now,
+		ByClientIP: map[string]domainCacheFileEntry{},
+		ByIP:       map[string]domainCacheFileEntry{},
+	}
+	d.mu.RLock()
+	for k, ent := range d.byClientIP {
+		if ent.Expires.After(now) {
+			dump.ByClientIP[k] = domainCacheFileEntry{Domain: ent.Domain, Expires: ent.Expires}
+		}
+	}
+	for k, ent := range d.byIP {
+		if ent.Expires.After(now) {
+			dump.ByIP[k] = domainCacheFileEntry{Domain: ent.Domain, Expires: ent.Expires}
+		}
+	}
+	d.mu.RUnlock()
+	raw, err := json.Marshal(dump)
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
+// LoadFrom restores a snapshot, dropping entries that expired while the
+// process was down and respecting the cache cap. It returns the number of
+// entries restored; a missing file surfaces as os.ErrNotExist for the caller
+// to treat as a normal first start.
+func (d *DomainCache) LoadFrom(path string) (int, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	var dump domainCacheFile
+	if err := json.Unmarshal(raw, &dump); err != nil {
+		return 0, fmt.Errorf("parse %s: %w", path, err)
+	}
+	if dump.Version != domainCacheFileVersion {
+		return 0, fmt.Errorf("%s: unsupported version %d", path, dump.Version)
+	}
+	now := time.Now()
+	loaded := 0
+	d.mu.Lock()
+	for k, ent := range dump.ByClientIP {
+		if len(d.byClientIP) >= d.maxEntries {
+			break
+		}
+		if ent.Domain != "" && ent.Expires.After(now) {
+			d.byClientIP[k] = domainEntry{Domain: ent.Domain, Expires: ent.Expires}
+			loaded++
+		}
+	}
+	for k, ent := range dump.ByIP {
+		if len(d.byIP) >= d.maxEntries {
+			break
+		}
+		if ent.Domain != "" && ent.Expires.After(now) {
+			d.byIP[k] = domainEntry{Domain: ent.Domain, Expires: ent.Expires}
+			loaded++
+		}
+	}
+	d.mu.Unlock()
+	return loaded, nil
 }
 
 // PruneExpired drops entries past their TTL; called on every flow flush so an

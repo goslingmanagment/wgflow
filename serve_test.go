@@ -1,8 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"net"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -47,6 +50,101 @@ func TestDomainCacheTTLExpiry(t *testing.T) {
 	defer d.mu.RUnlock()
 	if len(d.byClientIP) != 0 || len(d.byIP) != 0 {
 		t.Fatalf("PruneExpired left %d/%d entries", len(d.byClientIP), len(d.byIP))
+	}
+}
+
+func TestDomainCacheSaveLoadRoundTrip(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domains.cache.json")
+	d := NewDomainCache()
+	d.Put("10.66.66.6", "142.250.1.1", "youtube.com", 600)
+	d.Put("10.66.66.7", "104.16.0.1", "cloudflare.com", 600)
+	// An already-expired entry must not survive the round trip.
+	d.Put("10.66.66.8", "198.51.100.9", "dead.example.com", 600)
+	past := time.Now().Add(-time.Second)
+	d.mu.Lock()
+	ent := d.byClientIP["10.66.66.8|198.51.100.9"]
+	ent.Expires = past
+	d.byClientIP["10.66.66.8|198.51.100.9"] = ent
+	ent = d.byIP["198.51.100.9"]
+	ent.Expires = past
+	d.byIP["198.51.100.9"] = ent
+	d.mu.Unlock()
+
+	if err := d.SaveTo(path); err != nil {
+		t.Fatalf("SaveTo: %v", err)
+	}
+	restored := NewDomainCache()
+	n, err := restored.LoadFrom(path)
+	if err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("LoadFrom restored nothing")
+	}
+	if got := restored.Lookup("10.66.66.6", "142.250.1.1"); got != "youtube.com" {
+		t.Fatalf("client-scoped lookup after restore = %q, want youtube.com", got)
+	}
+	if got := restored.Lookup("10.66.66.99", "104.16.0.1"); got != "cloudflare.com" {
+		t.Fatalf("byIP lookup after restore = %q, want cloudflare.com", got)
+	}
+	if got := restored.Lookup("10.66.66.8", "198.51.100.9"); got != "" {
+		t.Fatalf("expired entry survived restore: %q", got)
+	}
+}
+
+func TestDomainCacheLoadCorruptFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domains.cache.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDomainCache()
+	if _, err := d.LoadFrom(path); err == nil {
+		t.Fatal("LoadFrom must fail on a corrupt file")
+	}
+	// The cache stays usable after a failed load.
+	d.Put("10.66.66.6", "142.250.1.1", "youtube.com", 600)
+	if got := d.Lookup("10.66.66.6", "142.250.1.1"); got != "youtube.com" {
+		t.Fatalf("cache unusable after failed load, Lookup = %q", got)
+	}
+}
+
+func TestDomainCacheLoadVersionMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domains.cache.json")
+	body := fmt.Sprintf(`{"version":%d,"by_client_ip":{},"by_ip":{}}`, domainCacheFileVersion+1)
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewDomainCache().LoadFrom(path); err == nil {
+		t.Fatal("LoadFrom must reject an unknown format version")
+	}
+}
+
+func TestDomainCacheLoadMissingFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domains.cache.json")
+	_, err := NewDomainCache().LoadFrom(path)
+	if !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing file must surface os.ErrNotExist, got %v", err)
+	}
+}
+
+func TestDomainCacheLoadRespectsCap(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "domains.cache.json")
+	d := NewDomainCache()
+	for i := 0; i < 10; i++ {
+		d.Put("10.66.66.6", fmt.Sprintf("192.0.2.%d", i), fmt.Sprintf("h%d.example.com", i), 600)
+	}
+	if err := d.SaveTo(path); err != nil {
+		t.Fatalf("SaveTo: %v", err)
+	}
+	restored := NewDomainCache()
+	restored.maxEntries = 3
+	if _, err := restored.LoadFrom(path); err != nil {
+		t.Fatalf("LoadFrom: %v", err)
+	}
+	restored.mu.RLock()
+	defer restored.mu.RUnlock()
+	if len(restored.byClientIP) > 3 || len(restored.byIP) > 3 {
+		t.Fatalf("load ignored cap: %d/%d entries", len(restored.byClientIP), len(restored.byIP))
 	}
 }
 
