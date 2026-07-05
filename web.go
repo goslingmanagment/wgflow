@@ -69,8 +69,17 @@ func webCmd(args []string) error {
 	clientsConfig := fset.String("clients-config", "/etc/wgflow/clients.yaml", "client alias config for person grouping (optional)")
 	authPassword := fset.String("auth-password", os.Getenv("WGFLOW_WEB_PASSWORD"), "HTTP Basic Auth password; defaults to WGFLOW_WEB_PASSWORD")
 	authRealm := fset.String("auth-realm", "wgflow", "HTTP Basic Auth realm")
+	allowNoAuth := fset.Bool("allow-no-auth", false, "serve without a password even on a non-loopback address (dangerous: the whole household's traffic becomes public)")
 	if err := fset.Parse(args); err != nil {
 		return err
+	}
+	if err := validateWebAuth(*listen, *authPassword, *allowNoAuth); err != nil {
+		return err
+	}
+	if *authPassword == "" {
+		// Deliberately loud: running open is a conscious choice (loopback+tunnel
+		// is the blessed setup), and the operator should see it in the journal.
+		log.Printf("WARNING: no auth password set — anyone who can reach %s sees all traffic history; set WGFLOW_WEB_PASSWORD to protect it", *listen)
 	}
 	aliases, err := loadAliasConfig(*clientsConfig)
 	if err != nil {
@@ -85,22 +94,71 @@ func webCmd(args []string) error {
 		handler = basicAuthHandler(handler, *authPassword, *authRealm)
 	}
 	log.Printf("wgflow web listening on %s (log-dir=%s rollup=%s auth=%t)", *listen, *logDir, *rollupPath, *authPassword != "")
-	return http.ListenAndServe(*listen, handler)
+	srv := &http.Server{
+		Addr:    *listen,
+		Handler: handler,
+		// Slow-loris protection. No WriteTimeout on purpose: it would kill the
+		// long-lived SSE stream at /api/stats/stream.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
+	}
+	return srv.ListenAndServe()
+}
+
+// validateWebAuth refuses to start a passwordless server on a non-loopback
+// address. The default -listen :8080 binds every interface, and the API exposes
+// the whole household's browsing history — that must never happen silently.
+// Loopback without a password is fine (SSH tunnel is the blessed setup).
+func validateWebAuth(listen, password string, allowNoAuth bool) error {
+	if password != "" || allowNoAuth || listenIsLoopback(listen) {
+		return nil
+	}
+	return fmt.Errorf("refusing to listen on %q without a password: it would expose all traffic history to the network; set WGFLOW_WEB_PASSWORD (or -auth-password), bind to 127.0.0.1 and tunnel in, or pass --allow-no-auth to serve open anyway", listen)
+}
+
+// listenIsLoopback reports whether a listen address can only be reached from
+// this host. An empty host (":8080") binds all interfaces — not loopback.
+func listenIsLoopback(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = listen
+	}
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *webServer) routes(mux *http.ServeMux) {
-	mux.HandleFunc("/api/system", s.handleSystem)
-	mux.HandleFunc("/api/throughput", s.handleThroughput)
-	mux.HandleFunc("/api/clients", s.handleClients)
-	mux.HandleFunc("/api/clients/", s.handleClientDetail)
-	mux.HandleFunc("/api/snapshot", s.handleSnapshot)
-	mux.HandleFunc("/api/traffic", s.handleTraffic)
-	mux.HandleFunc("/api/categories", s.handleCategories)
-	mux.HandleFunc("/api/dns", s.handleDNS)
-	mux.HandleFunc("/api/tls", s.handleTLS)
-	mux.HandleFunc("/api/report", s.handleReport)
-	mux.HandleFunc("/api/stats/stream", s.handleStatsStream)
+	mux.HandleFunc("/api/system", requireGET(s.handleSystem))
+	mux.HandleFunc("/api/throughput", requireGET(s.handleThroughput))
+	mux.HandleFunc("/api/clients", requireGET(s.handleClients))
+	mux.HandleFunc("/api/clients/", requireGET(s.handleClientDetail))
+	mux.HandleFunc("/api/snapshot", requireGET(s.handleSnapshot))
+	mux.HandleFunc("/api/traffic", requireGET(s.handleTraffic))
+	mux.HandleFunc("/api/categories", requireGET(s.handleCategories))
+	mux.HandleFunc("/api/dns", requireGET(s.handleDNS))
+	mux.HandleFunc("/api/tls", requireGET(s.handleTLS))
+	mux.HandleFunc("/api/report", requireGET(s.handleReport))
+	mux.HandleFunc("/api/stats/stream", requireGET(s.handleStatsStream))
 	mux.Handle("/", s.staticHandler())
+}
+
+// requireGET rejects mutating methods on the read-only API with a proper 405 +
+// Allow header instead of letting handlers silently treat POST like GET.
+func requireGET(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			w.Header().Set("Allow", "GET, HEAD")
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		h(w, r)
+	}
 }
 
 func basicAuthHandler(next http.Handler, password, realm string) http.Handler {
@@ -125,23 +183,58 @@ func (s *webServer) staticHandler() http.Handler {
 	}
 	fileServer := http.FileServer(http.FS(dist))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Any /api/ path that reached the catch-all handler matched no API route;
+		// answering it with the SPA's HTML and a 200 hides typos from API clients.
+		if strings.HasPrefix(r.URL.Path, "/api/") {
+			writeJSONError(w, http.StatusNotFound, "unknown API path")
+			return
+		}
 		p := strings.TrimPrefix(r.URL.Path, "/")
 		if p == "" {
 			p = "index.html"
 		}
 		if f, err := dist.Open(p); err == nil {
+			st, statErr := f.Stat()
 			f.Close()
-			fileServer.ServeHTTP(w, r)
-			return
+			if statErr == nil && st.IsDir() {
+				// Never autoindex embedded directories (/assets/ listed every bundle).
+				http.NotFound(w, r)
+				return
+			}
+			if statErr == nil {
+				setStaticCacheHeaders(w, p)
+				fileServer.ServeHTTP(w, r)
+				return
+			}
 		}
 		b, err := fs.ReadFile(dist, "index.html")
 		if err != nil {
 			http.Error(w, "ui not built", http.StatusNotFound)
 			return
 		}
+		w.Header().Set("Cache-Control", "no-cache")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(b)
 	})
+}
+
+// setStaticCacheHeaders lets browsers cache the content-hashed Vite bundles
+// forever while always revalidating the entry point that references them.
+func setStaticCacheHeaders(w http.ResponseWriter, p string) {
+	if strings.HasPrefix(p, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		return
+	}
+	if p == "index.html" {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+}
+
+// writeJSONError is the JSON analog of http.Error for API responses.
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
