@@ -55,6 +55,7 @@ type RuntimeStats struct {
 	FlowRecords                uint64    `json:"flow_records"`
 	DNSRecords                 uint64    `json:"dns_records"`
 	TLSRecords                 uint64    `json:"tls_records"`
+	LogWriteErrors             uint64    `json:"log_write_errors"`
 	KernelPacketSocketPackets  uint64    `json:"kernel_packet_socket_packets"`
 	KernelPacketSocketDrops    uint64    `json:"kernel_packet_socket_drops"`
 	LastKernelDropsDelta       uint64    `json:"last_kernel_drops_delta"`
@@ -142,6 +143,14 @@ type ClientMap struct {
 	vpnNets []*net.IPNet
 }
 
+// maxFlowKeysPerFlush caps the per-interval flows map; overflow traffic is
+// aggregated under overflowRemoteIP with port 0 per client so byte counts
+// survive even a port scan that would otherwise mint millions of keys.
+const maxFlowKeysPerFlush = 200_000
+
+// overflowRemoteIP is the synthetic remote for flows folded by the cap.
+const overflowRemoteIP = "other"
+
 type FlowKey struct {
 	ClientIP   string
 	RemoteIP   string
@@ -222,17 +231,29 @@ type domainEntry struct {
 	Expires time.Time
 }
 
+// domainCacheMaxEntries bounds each DomainCache map. Entries are small, but a
+// client replaying crafted DNS answers could otherwise grow the maps forever.
+const domainCacheMaxEntries = 65536
+
 type DomainCache struct {
 	mu         sync.RWMutex
 	byClientIP map[string]domainEntry
 	byIP       map[string]domainEntry
+	maxEntries int
 }
 
 type JSONLogger struct {
-	mu  sync.Mutex
-	enc *json.Encoder
-	f   *os.File
+	mu           sync.Mutex
+	enc          *json.Encoder
+	f            *os.File
+	path         string
+	lastErrLogNS int64 // guarded by mu; rate-limits the error log line
 }
+
+// logWriteErrors counts failed JSONLogger writes across all log files. It is
+// package-level because the loggers are created before the StatsCollector and
+// the stats snapshot only needs the total.
+var logWriteErrors atomic.Uint64
 
 func main() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
@@ -346,7 +367,7 @@ func serve(args []string) error {
 	}
 	defer rollup.Close()
 	stats := NewStatsCollector(cfg, clients.Count())
-	stats.SetConfigLoaded(configSig.ModTime)
+	stats.SetConfigLoaded(configSig.ModTime())
 	defer stats.Write()
 
 	fd, err := openPacketSocket(cfg.Iface)
@@ -450,10 +471,17 @@ func serve(args []string) error {
 			key := FlowKey{ClientIP: clientIP, RemoteIP: remoteIP, Proto: proto, RemotePort: remotePort}
 			flowMu.Lock()
 			st := flows[key]
+			if st == nil && len(flows) >= maxFlowKeysPerFlush {
+				// A port scan can mint millions of distinct keys within one
+				// flush interval. Past the cap, fold new flows into a
+				// per-client overflow bucket so the bytes are still counted.
+				key = FlowKey{ClientIP: clientIP, RemoteIP: overflowRemoteIP, Proto: proto}
+				st = flows[key]
+			}
 			if st == nil {
 				st = &FlowStats{
-					Client: clientName, ClientIP: clientIP, RemoteIP: remoteIP,
-					Proto: proto, RemotePort: remotePort,
+					Client: clientName, ClientIP: clientIP, RemoteIP: key.RemoteIP,
+					Proto: proto, RemotePort: key.RemotePort,
 				}
 				flows[key] = st
 			}
@@ -522,6 +550,7 @@ func serve(args []string) error {
 			_ = flowLog.Write(rec)
 			records = append(records, rec)
 		}
+		cache.PruneExpired(now)
 		if len(records) > 0 {
 			pendingRollup = append(pendingRollup, records...)
 		}
@@ -564,7 +593,7 @@ func serve(args []string) error {
 					configSig, _ = fileSig(cfg.WGConfigPath)
 					stats.clientCount.Store(uint64(clients.Count()))
 					stats.configReloads.Add(1)
-					stats.SetConfigLoaded(configSig.ModTime)
+					stats.SetConfigLoaded(configSig.ModTime())
 					log.Printf("reloaded %s clients=%d", cfg.WGConfigPath, clients.Count())
 				}
 				continue
@@ -590,7 +619,7 @@ func serve(args []string) error {
 				configSig = nextSig
 				stats.clientCount.Store(uint64(clients.Count()))
 				stats.configReloads.Add(1)
-				stats.SetConfigLoaded(configSig.ModTime)
+				stats.SetConfigLoaded(configSig.ModTime())
 				log.Printf("config changed; reloaded %s clients=%d", cfg.WGConfigPath, clients.Count())
 			}
 		case now := <-flushTicker.C:
@@ -1129,16 +1158,26 @@ type reverseDNSResult struct {
 	expiresAt time.Time
 }
 
-var reverseDNSCache sync.Map
+// reverseDNSCacheMax bounds the PTR cache: the key space is every remote IP
+// ever seen, so without a cap a port scan grows it forever.
+const reverseDNSCacheMax = 4096
+
+var reverseDNSCache = struct {
+	sync.Mutex
+	m map[string]reverseDNSResult
+}{m: map[string]reverseDNSResult{}}
 
 func reverseTargetName(ip string) string {
-	if v, ok := reverseDNSCache.Load(ip); ok {
-		r := v.(reverseDNSResult)
-		if time.Now().Before(r.expiresAt) {
+	now := time.Now()
+	reverseDNSCache.Lock()
+	if r, ok := reverseDNSCache.m[ip]; ok {
+		if now.Before(r.expiresAt) {
+			reverseDNSCache.Unlock()
 			return r.name
 		}
-		reverseDNSCache.Delete(ip)
+		delete(reverseDNSCache.m, ip)
 	}
+	reverseDNSCache.Unlock()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 	names, err := net.DefaultResolver.LookupAddr(ctx, ip)
@@ -1150,7 +1189,24 @@ func reverseTargetName(ip string) string {
 	if name != "" {
 		ttl = 12 * time.Hour
 	}
-	reverseDNSCache.Store(ip, reverseDNSResult{name: name, expiresAt: time.Now().Add(ttl)})
+	reverseDNSCache.Lock()
+	if len(reverseDNSCache.m) >= reverseDNSCacheMax {
+		// Expired entries go first; if the cache is full of live entries drop
+		// arbitrary ones — a re-lookup is cheap next time the IP shows up.
+		for k, r := range reverseDNSCache.m {
+			if !now.Before(r.expiresAt) {
+				delete(reverseDNSCache.m, k)
+			}
+		}
+		for k := range reverseDNSCache.m {
+			if len(reverseDNSCache.m) < reverseDNSCacheMax {
+				break
+			}
+			delete(reverseDNSCache.m, k)
+		}
+	}
+	reverseDNSCache.m[ip] = reverseDNSResult{name: name, expiresAt: now.Add(ttl)}
+	reverseDNSCache.Unlock()
 	return name
 }
 
@@ -1611,6 +1667,7 @@ func (s *StatsCollector) Snapshot() RuntimeStats {
 		FlowRecords:                s.flowRecords.Load(),
 		DNSRecords:                 s.dnsRecords.Load(),
 		TLSRecords:                 s.tlsRecords.Load(),
+		LogWriteErrors:             logWriteErrors.Load(),
 		KernelPacketSocketPackets:  s.kernelPackets.Load(),
 		KernelPacketSocketDrops:    s.kernelDrops.Load(),
 		LastKernelDropsDelta:       s.lastDropsDelta.Load(),
@@ -1653,9 +1710,16 @@ func fileSize(path string) int64 {
 	return st.Size()
 }
 
+// FileSig identifies a config file version. ModTime is stored as UnixNano so
+// the != comparison in the reload loop is exact: comparing time.Time structs
+// with != is fragile (wall/monotonic clock and location are part of the value).
 type FileSig struct {
-	ModTime time.Time
-	Size    int64
+	ModTimeNS int64
+	Size      int64
+}
+
+func (s FileSig) ModTime() time.Time {
+	return time.Unix(0, s.ModTimeNS)
 }
 
 func fileSig(path string) (FileSig, error) {
@@ -1663,7 +1727,7 @@ func fileSig(path string) (FileSig, error) {
 	if err != nil {
 		return FileSig{}, err
 	}
-	return FileSig{ModTime: st.ModTime(), Size: st.Size()}, nil
+	return FileSig{ModTimeNS: st.ModTime().UnixNano(), Size: st.Size()}, nil
 }
 
 func NewJSONLogger(path string) (*JSONLogger, error) {
@@ -1671,13 +1735,24 @@ func NewJSONLogger(path string) (*JSONLogger, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &JSONLogger{f: f, enc: json.NewEncoder(f)}, nil
+	return &JSONLogger{f: f, enc: json.NewEncoder(f), path: path}, nil
 }
 
 func (l *JSONLogger) Write(v any) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	return l.enc.Encode(v)
+	err := l.enc.Encode(v)
+	if err != nil {
+		// Callers on the hot path ignore the return value, so account for the
+		// failure here. Log at most once a minute per logger: a full disk
+		// would otherwise flood the journal at packet rate.
+		total := logWriteErrors.Add(1)
+		if now := time.Now().UnixNano(); now-l.lastErrLogNS >= int64(time.Minute) {
+			l.lastErrLogNS = now
+			log.Printf("log write failed path=%s err=%v total_write_errors=%d", l.path, err, total)
+		}
+	}
+	return err
 }
 
 func (l *JSONLogger) Close() error {
@@ -1687,7 +1762,11 @@ func (l *JSONLogger) Close() error {
 }
 
 func NewDomainCache() *DomainCache {
-	return &DomainCache{byClientIP: map[string]domainEntry{}, byIP: map[string]domainEntry{}}
+	return &DomainCache{
+		byClientIP: map[string]domainEntry{},
+		byIP:       map[string]domainEntry{},
+		maxEntries: domainCacheMaxEntries,
+	}
 }
 
 func (d *DomainCache) Put(clientIP, ip, domain string, ttl uint32) {
@@ -1697,11 +1776,51 @@ func (d *DomainCache) Put(clientIP, ip, domain string, ttl uint32) {
 	if ttl == 0 {
 		ttl = 300
 	}
-	exp := time.Now().Add(time.Duration(ttl) * time.Second)
-	ent := domainEntry{Domain: strings.TrimSuffix(domain, "."), Expires: exp}
+	now := time.Now()
+	ent := domainEntry{Domain: strings.TrimSuffix(domain, "."), Expires: now.Add(time.Duration(ttl) * time.Second)}
 	d.mu.Lock()
+	if len(d.byClientIP) >= d.maxEntries {
+		evictDomainEntries(d.byClientIP, d.maxEntries, now)
+	}
+	if len(d.byIP) >= d.maxEntries {
+		evictDomainEntries(d.byIP, d.maxEntries, now)
+	}
 	d.byClientIP[clientIP+"|"+ip] = ent
 	d.byIP[ip] = ent
+	d.mu.Unlock()
+}
+
+// evictDomainEntries makes room in a full map: expired entries go first, and
+// if everything is still live it drops arbitrary entries (map iteration
+// order) — losing a domain hint only degrades flow labels, never counting.
+func evictDomainEntries(m map[string]domainEntry, max int, now time.Time) {
+	for k, ent := range m {
+		if !ent.Expires.After(now) {
+			delete(m, k)
+		}
+	}
+	for k := range m {
+		if len(m) < max {
+			break
+		}
+		delete(m, k)
+	}
+}
+
+// PruneExpired drops entries past their TTL; called on every flow flush so an
+// idle cache does not hold expired mappings for hours.
+func (d *DomainCache) PruneExpired(now time.Time) {
+	d.mu.Lock()
+	for k, ent := range d.byClientIP {
+		if !ent.Expires.After(now) {
+			delete(d.byClientIP, k)
+		}
+	}
+	for k, ent := range d.byIP {
+		if !ent.Expires.After(now) {
+			delete(d.byIP, k)
+		}
+	}
 	d.mu.Unlock()
 }
 
