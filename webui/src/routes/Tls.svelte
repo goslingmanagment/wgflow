@@ -2,16 +2,18 @@
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { catColor, ago } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
+  import { debounced } from '../lib/debounce.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
   import Win from '../lib/Win.svelte'
 
   let q = $state('')
+  const qd = debounced(() => q.trim())
   const res = createResource()
 
   $effect(() => {
     trackRefreshTick()
     const u = new URLSearchParams({ since: ui.since })
-    if (q) u.set('q', q)
+    if (qd.value) u.set('q', qd.value)
     res.load('/api/tls?' + u.toString())
   })
   const data = $derived(res.data)

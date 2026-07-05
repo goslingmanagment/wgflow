@@ -1,7 +1,8 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { fmtBytes, catColor } from '../lib/format.js'
+  import { fmtBytes, catColor, CAT_COLORS } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
+  import { debounced } from '../lib/debounce.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
   import TargetCell, { appTitle, infraTitle } from '../lib/TargetCell.svelte'
   import Win from '../lib/Win.svelte'
@@ -9,6 +10,7 @@
   let cat = $state('all')
   let proto = $state('all')
   let q = $state('')
+  const qd = debounced(() => q.trim())
   const res = createResource()
 
   $effect(() => {
@@ -16,11 +18,14 @@
     const u = new URLSearchParams({ since: ui.since, limit: '60' })
     if (cat !== 'all') u.set('category', cat)
     if (proto !== 'all') u.set('proto', proto)
-    if (q) u.set('q', q)
+    if (qd.value) u.set('q', qd.value)
     res.load('/api/traffic?' + u.toString())
   })
   const data = $derived(res.data)
-  const CATS = ['all', 'google', 'meta', 'apple', 'telegram', 'yandex', 'bytedance', 'fansly', 'twitch', 'cloudflare', 'aws', 'discord', 'games', 'p2p', 'dns', 'other']
+  const rows = $derived(data?.rows ?? []) // nil-safe: a nil slice on the Go side must not crash the route
+  // The filter list is derived from CAT_COLORS so a newly classified category
+  // can never be missing here (the hand-written copy had drifted by six).
+  const CATS = ['all', ...Object.keys(CAT_COLORS)]
 </script>
 
 <div class="head"><h1 class="serif">Traffic</h1><span class="pgwin"><Win /></span></div>
@@ -32,13 +37,13 @@
 
 {#if res.err && !data}<p class="err">Couldn't load traffic. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
   {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
-  <div class="bar">last {ui.since} · {data.rows.length} of {data.total} flows · sorted by total</div>
+  <div class="bar">last {ui.since} · {rows.length} of {data.total ?? 0} flows · sorted by total</div>
   <div class="card">
     <div class="tscroll">
       <table>
         <thead><tr><th>Client</th><th>Category</th><th>App</th><th>Infra</th><th>Proto</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th></tr></thead>
         <tbody>
-          {#each data.rows as f}
+          {#each rows as f}
             <tr>
               <td><a href="#/clients/{encodeURIComponent(f.client)}">{f.client}</a></td>
               <td><span class="cd" style="background:{catColor(f.category)}"></span>{f.category}</td>
@@ -53,7 +58,7 @@
         </tbody>
       </table>
     </div>
-    {#if data.rows.length === 0}<p class="dim pad">No flows match these filters.</p>{/if}
+    {#if rows.length === 0}<p class="dim pad">No flows match these filters.</p>{/if}
   </div>
 {/if}
 

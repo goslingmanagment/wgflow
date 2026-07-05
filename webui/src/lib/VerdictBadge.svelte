@@ -1,8 +1,10 @@
 <script>
+  import InfoTip from './InfoTip.svelte'
   // Renders the per-device verdict. Honesty is structural: the label is hedged
   // by confidence ("вероятно активна"), it always carries an "inferred" marker,
-  // the firing rule + standing caveat live in the tooltip, and a SILENT verdict
-  // is downgraded to "тишина не подтверждена" whenever the logger isn't healthy.
+  // the firing rule + standing caveat live in a tap-reachable InfoTip (title=
+  // alone is invisible on iOS Safari), and a SILENT verdict is downgraded to
+  // "тишина не подтверждена" whenever the logger isn't healthy.
   let { verdict = null, loggerOk = true, compact = false } = $props()
 
   const CAVEAT = ' — предположение по метаданным; не доказывает действие человека.'
@@ -25,9 +27,11 @@
   })
 </script>
 
-<span class="vb {view.cls}" class:compact title={view.title}>
-  <span class="dot"></span>{view.label}<span class="inf">inferred</span>
-</span>
+<InfoTip text={view.title}>
+  <span class="vb {view.cls}" class:compact>
+    <span class="dot"></span>{view.label}<span class="inf">inferred</span>
+  </span>
+</InfoTip>
 
 <style>
   .vb {

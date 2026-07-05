@@ -17,8 +17,23 @@
   let copied = $state(false)
   let copyErr = $state(false)
   let snapWin = $state('')
+  let drawerEl = $state(null)
   const res = createResource()
   const snap = $derived(res.data)
+
+  // Move focus into the drawer on open and hand it back on close (no full focus
+  // trap — this is a single-owner home panel, Escape + backdrop are enough).
+  let prevFocus = null
+  $effect(() => {
+    if (open && drawerEl) {
+      prevFocus = document.activeElement
+      drawerEl.focus()
+      return () => {
+        prevFocus?.focus?.()
+        prevFocus = null
+      }
+    }
+  })
 
   const CAVEAT =
     '⚠ inferred из метаданных. HTTPS не виден; QUIC даёт IP без имени; ' +
@@ -136,9 +151,11 @@
   }
 </script>
 
+<svelte:window onkeydown={(e) => open && e.key === 'Escape' && onClose()} />
+
 {#if open}
   <div class="backdrop" onclick={onClose} role="presentation"></div>
-  <div class="drawer" role="dialog" aria-modal="true" aria-label="Срез">
+  <div class="drawer" role="dialog" aria-modal="true" aria-label="Срез" tabindex="-1" bind:this={drawerEl}>
     <header>
       <div class="title serif">Срез <span>· последние {win}</span></div>
       <div class="acts">
@@ -192,6 +209,9 @@
     flex-direction: column;
     box-shadow: -16px 0 40px rgba(0, 0, 0, 0.35);
     overscroll-behavior: contain;
+  }
+  .drawer:focus {
+    outline: none; /* programmatic focus target only; a ring around the whole drawer is noise */
   }
   header {
     display: flex;

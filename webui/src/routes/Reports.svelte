@@ -1,5 +1,4 @@
 <script>
-  import { trackRefreshTick } from '../lib/store.svelte.js'
   import { fmtBytes } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
@@ -15,25 +14,35 @@
   let since = $state('24h')
   const res = createResource()
 
+  // Deliberately NOT tied to the 5s refresh tick: /api/report joins the whole
+  // rollup window (up to 30d), the heaviest endpoint we have. Load on mount and
+  // when the window changes only.
   $effect(() => {
-    trackRefreshTick()
     res.load('/api/report?since=' + since)
   })
   const data = $derived(res.data)
   const cTotal = $derived((data?.by_client || []).reduce((a, r) => a + r.total, 0) || 1)
   const kTotal = $derived((data?.by_category || []).reduce((a, r) => a + r.total, 0) || 1)
 
+  // RFC 4180: quote fields containing commas/quotes/newlines (client names are
+  // user-controlled), doubling embedded quotes.
+  const csvField = (v) => {
+    const s = String(v ?? '')
+    return /[",\n\r]/.test(s) ? '"' + s.replaceAll('"', '""') + '"' : s
+  }
   function exportCSV() {
     if (!data) return
     const lines = [['section', 'name', 'down_bytes', 'up_bytes', 'total_bytes']]
-    data.by_client.forEach((r) => lines.push(['client', r.name, r.down, r.up, r.total]))
-    data.by_category.forEach((r) => lines.push(['category', r.name, r.down, r.up, r.total]))
-    const blob = new Blob([lines.map((l) => l.join(',')).join('\n')], { type: 'text/csv' })
+    ;(data.by_client ?? []).forEach((r) => lines.push(['client', r.name, r.down, r.up, r.total]))
+    ;(data.by_category ?? []).forEach((r) => lines.push(['category', r.name, r.down, r.up, r.total]))
+    const blob = new Blob([lines.map((l) => l.map(csvField).join(',')).join('\n')], { type: 'text/csv' })
     const a = document.createElement('a')
     a.href = URL.createObjectURL(blob)
     a.download = 'wgflow-report-' + since + '.csv'
     a.click()
-    URL.revokeObjectURL(a.href)
+    // Revoking synchronously can cancel the download in Safari — the click only
+    // schedules it. Give the browser a beat before releasing the blob.
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000)
   }
 </script>
 
@@ -47,14 +56,14 @@
 
 {#if res.err && !data}<p class="err">Couldn't load report. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
   {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
-  <div class="summ">Window <b>{WINS.find((w) => w[0] === since)?.[1]}</b> · rollup rows <b class="mono">{data.rollup_rows.toLocaleString()}</b></div>
+  <div class="summ">Window <b>{WINS.find((w) => w[0] === since)?.[1]}</b> · rollup rows <b class="mono">{(data.rollup_rows ?? 0).toLocaleString()}</b></div>
   <div class="two">
     <div class="card">
       <h3 class="serif">By client</h3>
       <div class="tscroll">
         <table>
           <thead><tr><th>Client</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th><th class="r">Share</th></tr></thead>
-          <tbody>{#each data.by_client as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / cTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
+          <tbody>{#each data.by_client ?? [] as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / cTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
         </table>
       </div>
     </div>
@@ -63,7 +72,7 @@
       <div class="tscroll">
         <table>
           <thead><tr><th>Category</th><th class="r">Down</th><th class="r">Up</th><th class="r">Total</th><th class="r">Share</th></tr></thead>
-          <tbody>{#each data.by_category as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / kTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
+          <tbody>{#each data.by_category ?? [] as r}<tr><td>{r.name}</td><td class="r mono">{fmtBytes(r.down)}</td><td class="r mono">{fmtBytes(r.up)}</td><td class="r mono">{fmtBytes(r.total)}</td><td class="r mono dim">{((r.total / kTotal) * 100).toFixed(0)}%</td></tr>{/each}</tbody>
         </table>
       </div>
     </div>

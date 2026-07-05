@@ -3,6 +3,7 @@
   import { fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
+  import InfoTip from '../lib/InfoTip.svelte'
   import Icon from '../lib/Icon.svelte'
   import Chart from '../lib/Chart.svelte'
   import DayTimeline from '../lib/DayTimeline.svelte'
@@ -72,6 +73,11 @@
   // zeros); show "not found" rather than a raw HTTP error, even if an earlier
   // client's data is still around.
   const notFound = $derived(res.errStatus === 404)
+  // Defensive defaults: one nil slice on the Go side must not crash the route.
+  const targets = $derived(data?.top_targets ?? [])
+  const recentTls = $derived(data?.recent_tls ?? [])
+  const recentDns = $derived(data?.recent_dns ?? [])
+  const categories = $derived(data?.categories ?? [])
   function applyAnchor() {
     const u = mskAnchorUnix(anchorInput)
     if (u) fromAnchor = u
@@ -127,7 +133,7 @@
     <div class="kpi"><div class="k">Rate · {windowLabel}</div><div class="v mono">{fmtRate(data.total, secs)} <small>Mbit/s</small></div></div>
     <div class="kpi"><div class="k">Download</div><div class="v mono">{fmtBytes(data.down)}</div></div>
     <div class="kpi"><div class="k">Upload</div><div class="v mono">{fmtBytes(data.up)}</div></div>
-    <div class="kpi"><div class="k">Top category</div><div class="v"><span class="cd" style="background:{catColor(data.categories[0]?.category)}"></span>{data.categories[0]?.category || '—'}</div></div>
+    <div class="kpi"><div class="k">Top category</div><div class="v"><span class="cd" style="background:{catColor(categories[0]?.category)}"></span>{categories[0]?.category || '—'}</div></div>
   </div>
   <div class="caveat" title="Wire bytes are ~94–95% of these totals and packet counts are approximate: the kernel coalesces segments (GSO/GRO) before wgflow counts them. HTTPS payloads are never inspected.">~94–95% of bytes · packets approximate (GSO/GRO)</div>
 
@@ -145,7 +151,7 @@
         <table class="t">
           <thead><tr><th>Target</th><th class="c-cat">Cat</th><th class="r c-num">Down</th><th class="r c-num">Up</th></tr></thead>
           <tbody>
-            {#each data.top_targets.slice(0, 8) as t}
+            {#each targets.slice(0, 8) as t}
               {@const v = targetView(t)}
               <tr class:bg={t.category === 'apple'}>
                 <td class="tgt" title={v.title}>
@@ -155,19 +161,19 @@
                   </div>
                   {#if v.infra}<div class="infra">{v.infra}</div>{/if}
                 </td>
-                <td class="cat"><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">?</span>{/if}</td>
+                <td class="cat"><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<InfoTip text="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven."><span class="hedge">?</span></InfoTip>{/if}</td>
                 <td class="r mono">{fmtBytes(t.down)}</td>
                 <td class="r mono">{fmtBytes(t.up)}</td>
               </tr>
             {/each}
-            {#if data.top_targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
+            {#if targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
           </tbody>
         </table>
       </div>
     </div>
     <div class="card">
       <div class="ch"><h3 class="serif">Recent sites</h3><span class="hint">TLS/QUIC · МСК</span></div>
-      {#each data.recent_tls.slice(0, 6) as r}
+      {#each recentTls.slice(0, 6) as r}
         <div class="li">
           <Icon name={r.protocol === 'quic' ? 'activity' : 'lock'} size={13} />
           <span class="g">{r.server_name}</span>
@@ -175,18 +181,18 @@
           <span class="ago mono">{hhmmMSK(r.ts)}</span>
         </div>
       {/each}
-      {#if data.recent_tls.length === 0}<div class="empty">No TLS/QUIC handshakes recently.</div>{/if}
+      {#if recentTls.length === 0}<div class="empty">No TLS/QUIC handshakes recently.</div>{/if}
       <div class="ch" style="margin-top:12px"><h3 class="serif">Recent DNS</h3><span class="hint">МСК</span></div>
-      {#each data.recent_dns.slice(0, 6) as r}
+      {#each recentDns.slice(0, 6) as r}
         <div class="li"><span class="qt mono">{r.qtype}</span><span class="g">{r.query}</span>{#if r.rcode !== 0}<span class="nx">{dnsRcodeName(r.rcode)}</span>{:else}<span class="ago mono">{hhmmMSK(r.ts)}</span>{/if}</div>
       {/each}
-      {#if data.recent_dns.length === 0}<div class="empty">No DNS queries recently — likely cached or encrypted (DoH/DoT).</div>{/if}
+      {#if recentDns.length === 0}<div class="empty">No DNS queries recently — likely cached or encrypted (DoH/DoT).</div>{/if}
     </div>
   </div>
 
   <div class="card">
     <div class="ch"><h3 class="serif">Across the day</h3><span class="hint">24h · by category</span></div>
-    <DayTimeline day={data.day} />
+    <DayTimeline day={data.day ?? []} />
   </div>
 
   {#if data.minutes?.length}

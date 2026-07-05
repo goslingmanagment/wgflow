@@ -2,12 +2,14 @@
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { dnsRcodeName, hhmmssMSK } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
+  import { debounced } from '../lib/debounce.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
   import Win from '../lib/Win.svelte'
 
   let qtype = $state('all')
   let errorsOnly = $state(false)
   let q = $state('')
+  const qd = debounced(() => q.trim())
   const res = createResource()
 
   $effect(() => {
@@ -15,10 +17,11 @@
     const u = new URLSearchParams({ since: ui.since, limit: '120' })
     if (qtype !== 'all') u.set('qtype', qtype)
     if (errorsOnly) u.set('errors', '1')
-    if (q) u.set('q', q)
+    if (qd.value) u.set('q', qd.value)
     res.load('/api/dns?' + u.toString())
   })
   const data = $derived(res.data)
+  const records = $derived(data?.records ?? []) // nil-safe: a nil slice on the Go side must not crash the route
   const QT = ['all', 'A', 'AAAA', 'CNAME', 'HTTPS']
 </script>
 
@@ -31,13 +34,13 @@
 
 {#if res.err && !data}<p class="err">Couldn't load DNS. ({res.err})</p>{:else if !data}<p class="dim">Loading…</p>{:else}
   {#if res.stale}<StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />{/if}
-  <div class="bar">last {ui.since} · {data.records.length} shown · <span class="warn">{data.errors} DNS errors</span></div>
+  <div class="bar">last {ui.since} · {records.length} shown · <span class="warn">{data.errors ?? 0} DNS errors</span></div>
   <div class="card">
     <div class="tscroll">
       <table>
         <thead><tr><th>Time МСК</th><th>Client</th><th>Query</th><th>Type</th><th>Code</th><th>Answer</th></tr></thead>
         <tbody>
-          {#each data.records as r}
+          {#each records as r}
             <tr>
               <td class="mono dim">{hhmmssMSK(r.ts)}</td>
               <td>{r.client}</td>
@@ -50,7 +53,7 @@
         </tbody>
       </table>
     </div>
-    {#if data.records.length === 0}<p class="dim pad">No queries match.</p>{/if}
+    {#if records.length === 0}<p class="dim pad">No queries match.</p>{/if}
   </div>
 {/if}
 

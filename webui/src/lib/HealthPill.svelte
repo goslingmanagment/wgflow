@@ -1,20 +1,24 @@
 <script>
   import { health } from './store.svelte.js'
+  import InfoTip from './InfoTip.svelte'
   // The single status chip used everywhere. Color + label are driven by the
   // shared logger-health verdict, so no screen can show a hardcoded green dot.
+  // The reason lives in an InfoTip (tap-reachable on iOS), not just a title=.
   let { rate = false } = $props()
   const CLS = { live: 'ok', stale: 'warn', down: 'down', unknown: 'warn' }
   const LABEL = { live: 'live', stale: 'stale', down: 'offline', unknown: 'unknown' }
 </script>
 
-<span class="hp {CLS[health.status] || 'down'}" title={health.detail}>
-  <span class="dot" class:pulse={health.status === 'live'}></span>
-  {#if rate && health.status === 'live' && health.mbit != null}
-    {health.mbit.toFixed(1)}<small>Mbit/s</small>
-  {:else}
-    {LABEL[health.status] || 'offline'}
-  {/if}
-</span>
+<InfoTip text={health.detail}>
+  <span class="hp {CLS[health.status] || 'down'}">
+    <span class="dot" class:pulse={health.status === 'live'}></span>
+    {#if rate && health.status === 'live' && health.mbit != null}
+      {health.mbit.toFixed(1)}<small>Mbit/s</small>
+    {:else}
+      {LABEL[health.status] || 'offline'}
+    {/if}
+  </span>
+</InfoTip>
 
 <style>
   .hp {
