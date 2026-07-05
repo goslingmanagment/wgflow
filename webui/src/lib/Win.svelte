@@ -1,12 +1,10 @@
 <script>
   import { setSince, ui } from './store.svelte.js'
   import { WINDOWS } from './format.js'
-  let { day = true } = $props()
-  const options = $derived(day ? WINDOWS : WINDOWS.filter((w) => w.value !== '24h'))
 </script>
 
 <div class="seg" role="group" aria-label="Time window">
-  {#each options as w}
+  {#each WINDOWS as w}
     <button class:on={ui.since === w.value} onclick={() => setSince(w.value)}>{w.label}</button>
   {/each}
 </div>

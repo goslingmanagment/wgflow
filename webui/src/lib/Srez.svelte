@@ -1,6 +1,7 @@
 <script>
   import { fmtBytes, hhmmMSK } from './format.js'
   import { createResource } from './resource.svelte.js'
+  import { aggVerdict, personOf } from './verdict.js'
   import { trackRefreshTick } from './store.svelte.js'
   import StaleBanner from './StaleBanner.svelte'
 
@@ -45,7 +46,6 @@
 
   const WL = { '5m': '5 минут', '10m': '10 минут', '15m': '15 минут', '30m': '30 минут' }
   const windowLabel = (w) => WL[w] || 'окно ' + w
-  const personOf = (n) => (n.indexOf('-') > 0 ? n.slice(0, n.indexOf('-')) : n)
   const deviceLabel = (n) => (n.indexOf('-') > 0 ? n.slice(n.indexOf('-') + 1) : n)
 
   function statusWord(v, loggerOk) {
@@ -55,6 +55,7 @@
     if (v.status === 'active') return hedged ? 'вероятно активна' : 'активна'
     if (v.status === 'likely-background') return hedged ? 'вероятно фон' : 'фон'
     if (v.status === 'silent') return 'тишина'
+    if (v.status === 'unknown') return 'нет вердикта (rollup недоступен)'
     return v.status
   }
 
@@ -67,26 +68,20 @@
     return [cat, 'без имени (QUIC)'].filter(Boolean).join(' · ')
   }
 
-  function personVerdict(devices) {
-    const order = { active: 3, 'likely-background': 2, silent: 1 }
-    let best = null
-    for (const d of devices) {
-      if (!best || (order[d.verdict?.status] || 0) > (order[best.status] || 0)) best = d.verdict
-    }
-    return best
-  }
-
   function personConclusion(devices, loggerOk) {
     if (!loggerOk) return 'логгер не подтверждён — активность и тишина не доказаны'
     const names = (ds) => ds.map((d) => deviceLabel(d.name)).join(', ')
     const active = devices.filter((d) => d.verdict?.status === 'active')
     const bg = devices.filter((d) => d.verdict?.status === 'likely-background')
     const silent = devices.filter((d) => d.verdict?.status === 'silent')
+    const unknown = devices.filter((d) => d.verdict?.status === 'unknown')
     if (active.length) {
       const others = [...bg, ...silent]
       return `активна с ${names(active)}` + (others.length ? `, ${names(others)} — не участвует` : '')
     }
     if (bg.length) return `вероятно фон (${names(bg)}), не человек`
+    // No verdict is not silence — the rollup DB was unreachable, nothing proven.
+    if (unknown.length) return 'вердикт недоступен (rollup БД не отвечает) — тишина не доказана'
     return 'тишина (логгер исправен, 0 байт)'
   }
 
@@ -104,7 +99,7 @@
     if (!people.length) out.push('Нет устройств с трафиком в окне.')
     for (const { person, devices, total } of people) {
       devices.sort((a, b) => b.total - a.total)
-      out.push(`${person} · ${statusWord(personVerdict(devices), snap.logger_ok)} · ${fmtBytes(total)}`)
+      out.push(`${person} · ${statusWord(aggVerdict(devices), snap.logger_ok)} · ${fmtBytes(total)}`)
       for (const c of devices) out.push(`  ${deviceLabel(c.name)}  ${fmtBytes(c.total)} · ${deviceDoing(c, snap.logger_ok)}`)
       out.push(`  Вывод: ${personConclusion(devices, snap.logger_ok)}`)
       out.push('─'.repeat(44))

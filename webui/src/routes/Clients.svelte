@@ -2,6 +2,7 @@
   import { setGroup, trackRefreshTick, ui } from '../lib/store.svelte.js'
   import { fmtBytes, fmtRate, sinceSeconds, catColor, verdictColor, deviceGlyph } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
+  import { aggVerdict, personOf } from '../lib/verdict.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
   import Icon from '../lib/Icon.svelte'
@@ -33,18 +34,10 @@
   // Group devices into people (server-resolved `person`, from clients.yaml or the
   // prefix fallback). Auto-expand when a person's devices disagree — the case the
   // owner most wants to see (phone active while the laptop is silent).
-  const ORDER = { active: 3, 'likely-background': 2, silent: 1 }
-  function aggVerdict(devices) {
-    let best = null
-    for (const d of devices) {
-      if (!best || (ORDER[d.verdict?.status] || 0) > (ORDER[best.status] || 0)) best = d.verdict
-    }
-    return best
-  }
   const grouped = $derived.by(() => {
     const m = {}
     for (const c of rows) {
-      const p = c.person || c.name
+      const p = c.person || personOf(c.name)
       if (!m[p]) m[p] = { person: p, devices: [], total: 0, cats: {} }
       m[p].devices.push(c)
       m[p].total += c.total

@@ -3,6 +3,7 @@
   import { fmtBytes, catColor } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
+  import TargetCell, { appTitle, infraTitle } from '../lib/TargetCell.svelte'
   import Win from '../lib/Win.svelte'
 
   let cat = $state('all')
@@ -41,22 +42,8 @@
             <tr>
               <td><a href="#/clients/{encodeURIComponent(f.client)}">{f.client}</a></td>
               <td><span class="cd" style="background:{catColor(f.category)}"></span>{f.category}</td>
-              <td class="app" title={f.app_target || (!f.is_ip ? f.target : '')}>
-                <span class="target-main">{f.app_target || (!f.is_ip ? f.target : '—')}</span>
-                {#if f.attribution_source}
-                  <span class="target-meta">
-                    <span>{f.attribution_source}</span>
-                    {#if f.attribution_candidates?.length > 1}<span class="org" title={f.attribution_candidates.join(', ')}>+{f.attribution_candidates.length - 1}</span>{/if}
-                  </span>
-                {/if}
-              </td>
-              <td class="infra" title={f.resolved_target ? `${f.target} · ${f.resolved_target}` : f.target}>
-                <span class="target-main">{f.is_ip ? f.target : 'direct'}</span>
-                <span class="target-meta">
-                  {#if f.resolved_target}<span>{f.resolved_target}</span>{:else if f.is_ip}<span>no hostname{f.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}
-                  {#if f.target_org}<span class="org">{f.target_org}</span>{/if}
-                </span>
-              </td>
+              <td class="app" title={appTitle(f)}><TargetCell row={f} kind="app" /></td>
+              <td class="infra" title={infraTitle(f)}><TargetCell row={f} kind="infra" /></td>
               <td class="mono dim">{f.proto}:{f.port}</td>
               <td class="r mono">{fmtBytes(f.down)}</td>
               <td class="r mono">{fmtBytes(f.up)}</td>
@@ -89,10 +76,6 @@
   td a:hover { color: var(--color-coral); }
   .r { text-align: right; }
   td.app, td.infra { color: var(--color-text); white-space: normal; overflow: visible; }
-  .target-main { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .target-meta { display: flex; align-items: center; gap: 5px; min-height: 14px; overflow: hidden; color: var(--color-muted); font-size: 10.5px; white-space: nowrap; }
-  .target-meta > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-  .org { color: var(--color-muted); border: 1px solid var(--color-border); border-radius: 4px; padding: 0 4px; font-size: 10px; flex: 0 0 auto; }
   .dim { color: var(--color-muted); }
   .cd { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
   .err { color: var(--color-danger); }

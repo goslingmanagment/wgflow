@@ -66,6 +66,10 @@
     }
   })
 
+  // `plot` is intentionally NOT reactive state: onMount registers before this
+  // effect, so the instance already exists by the effect's first run, and only
+  // `points` needs tracking — recreating the uPlot per data tick would tear
+  // down the canvas on every refresh.
   $effect(() => {
     const d = toData(points)
     if (plot) plot.setData(d)
