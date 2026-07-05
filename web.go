@@ -242,6 +242,16 @@ func writeJSON(w http.ResponseWriter, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
+// maxQueryWindow caps every client-supplied time window. Rollup readers
+// allocate one slot per minute of window per client (snapshotFromRollup's
+// make([]uint64, minutes)), so an unclamped ?from=1 or ?since=200000h is an
+// OOM vector, not just a slow query. 31 days ≈ 45k minutes ≈ 360KB/client.
+const maxQueryWindow = 31 * 24 * time.Hour
+
+// maxLimitParam caps ?limit=: the UI never asks for more than a few hundred
+// rows, so anything above this is a mistake or abuse.
+const maxLimitParam = 1000
+
 func parseSince(r *http.Request, def time.Duration) time.Duration {
 	v := r.URL.Query().Get("since")
 	if v == "" {
@@ -251,9 +261,11 @@ func parseSince(r *http.Request, def time.Duration) time.Duration {
 	if err != nil || d <= 0 {
 		return def
 	}
-	return d
+	return min(d, maxQueryWindow)
 }
 
+// atoiDefault parses ?limit=-style knobs; capped so a single request cannot
+// demand an unbounded response.
 func atoiDefault(s string, def int) int {
 	if s == "" {
 		return def
@@ -262,7 +274,7 @@ func atoiDefault(s string, def int) int {
 	if err != nil || n <= 0 {
 		return def
 	}
-	return n
+	return min(n, maxLimitParam)
 }
 
 func parseTimeParam(v string) (time.Time, bool) {
@@ -278,6 +290,8 @@ func parseTimeParam(v string) (time.Time, bool) {
 // parseRange reads an absolute window from ?from=&to= (unix seconds or RFC3339);
 // `to` defaults to now. ok=false when no usable from is present, so callers fall
 // back to the relative ?since=. This is what powers "после 02:05".
+// The window is clamped to maxQueryWindow (keeping the `to` end, since recent
+// data is what the caller actually wants) — see maxQueryWindow for why.
 func parseRange(r *http.Request) (from, to time.Time, ok bool) {
 	from, ok = parseTimeParam(r.URL.Query().Get("from"))
 	if !ok {
@@ -289,6 +303,9 @@ func parseRange(r *http.Request) (from, to time.Time, ok bool) {
 	}
 	if !to.After(from) {
 		return time.Time{}, time.Time{}, false
+	}
+	if to.Sub(from) > maxQueryWindow {
+		from = to.Add(-maxQueryWindow)
 	}
 	return from, to, true
 }
@@ -1186,6 +1203,15 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	recentCutoff := to.Add(-recentLookback)
 	aggList := s.clientFlowsWindow(name, from, to)
+	seriesMap := s.seriesByClient(from, to)
+	series, hasRollupRows := seriesMap[name]
+	// A name with no rollup rows in the window and no mention in the configs is
+	// a typo or a removed peer: 404 beats a fabricated all-zero client. When the
+	// rollup DB itself is unreadable we cannot prove absence, so we don't 404.
+	if !hasRollupRows && len(aggList) == 0 && !s.clientConfigured(name) && s.rollupReadable() {
+		writeJSONError(w, http.StatusNotFound, "unknown client")
+		return
+	}
 	attrs := s.flowAttributions(from, to, name)
 	var down, up uint64
 	cat := map[string]uint64{}
@@ -1203,7 +1229,6 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	recentDNS := s.recentDNSForClient(name, recentCutoff, to, 12)
 	recentTLS := s.recentTLSForClient(name, recentCutoff, to, 12)
-	series := s.seriesByClient(from, to)[name]
 	cats := mapToShares(cat)
 	loggerOK := s.loggerHealthy()
 	devKind := s.resolveDeviceKind(name)
@@ -1242,6 +1267,39 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		"logger_ok":   loggerOK,
 		"verdict":     verdict,
 	})
+}
+
+// clientConfigured reports whether a client name is declared anywhere: in
+// clients.yaml or as a "### Client <name>" comment in the WireGuard config
+// (the same convention ClientMap.Load keys on). Configured-but-silent devices
+// must keep answering with zeros, not 404.
+func (s *webServer) clientConfigured(name string) bool {
+	for _, dev := range s.aliases.Roster() {
+		if dev == name {
+			return true
+		}
+	}
+	lines, err := readLines(s.wgConfig)
+	if err != nil {
+		return false
+	}
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "### Client ") && strings.TrimSpace(strings.TrimPrefix(line, "### Client ")) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// rollupReadable is a cheap probe for "can we trust an empty rollup answer".
+func (s *webServer) rollupReadable() bool {
+	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		return false
+	}
+	db.Close()
+	return true
 }
 
 // clientFlowsWindow aggregates one client's per-target flows over [from, to] from
@@ -1490,12 +1548,22 @@ func (s *webServer) recentTLSForClient(name string, cutoff, to time.Time, limit 
 	return out
 }
 
+// clientDayTimeline buckets today's traffic by hour of day, starting at local
+// midnight — NOT a sliding 24h window: folding yesterday evening into the same
+// hour-of-day buckets made 16:00 yesterday indistinguishable from 16:00 today.
+// Hours after the current one stay zero (the frontend dims them; contract
+// agreed with the UI side).
 func (s *webServer) clientDayTimeline(name string) []apiHour {
 	buckets := make([]apiHour, 24)
 	for i := range buckets {
 		buckets[i] = apiHour{Hour: i, Cats: map[string]uint64{}}
 	}
-	if ok := s.clientDayTimelineFromIndex(name, buckets); ok {
+	now := time.Now().In(mskLocation)
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, mskLocation)
+	fromMinute := midnight.Unix() / 60
+	// Ignore rows past the current minute (clock skew) so future hours stay zero.
+	nowMinute := now.Unix() / 60
+	if ok := s.clientDayTimelineFromIndex(name, buckets, fromMinute, nowMinute); ok {
 		return buckets
 	}
 	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
@@ -1503,20 +1571,19 @@ func (s *webServer) clientDayTimeline(name string) []apiHour {
 		return buckets
 	}
 	defer db.Close()
-	cutoffMinute := time.Now().Add(-24*time.Hour).Unix() / 60
 	_ = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(rollupBucket)
 		if b == nil {
 			return nil
 		}
 		c := b.Cursor()
-		start := []byte(fmt.Sprintf("%012d", cutoffMinute))
+		start := []byte(fmt.Sprintf("%012d", fromMinute))
 		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
 			var row RollupRow
 			if json.Unmarshal(v, &row) != nil {
 				continue
 			}
-			if row.Minute < cutoffMinute || row.Client != name {
+			if row.Minute < fromMinute || row.Minute > nowMinute || row.Client != name {
 				continue
 			}
 			h := mskHour(row.Minute)
@@ -1529,13 +1596,12 @@ func (s *webServer) clientDayTimeline(name string) []apiHour {
 	return buckets
 }
 
-func (s *webServer) clientDayTimelineFromIndex(name string, buckets []apiHour) bool {
+func (s *webServer) clientDayTimelineFromIndex(name string, buckets []apiHour, fromMinute, toMinute int64) bool {
 	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
 	if err != nil {
 		return false
 	}
 	defer db.Close()
-	cutoffMinute := time.Now().Add(-24*time.Hour).Unix() / 60
 	foundBucket := false
 	_ = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(rollupClientCategoryBucket)
@@ -1544,7 +1610,7 @@ func (s *webServer) clientDayTimelineFromIndex(name string, buckets []apiHour) b
 		}
 		foundBucket = true
 		prefix := []byte(name + "\t")
-		start := []byte(fmt.Sprintf("%s\t%012d", name, cutoffMinute))
+		start := []byte(fmt.Sprintf("%s\t%012d", name, fromMinute))
 		c := b.Cursor()
 		for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
 			parts := strings.SplitN(string(k), "\t", 3)
@@ -1552,7 +1618,7 @@ func (s *webServer) clientDayTimelineFromIndex(name string, buckets []apiHour) b
 				continue
 			}
 			minute, err := strconv.ParseInt(parts[1], 10, 64)
-			if err != nil || minute < cutoffMinute {
+			if err != nil || minute < fromMinute || minute > toMinute {
 				continue
 			}
 			total := decodeRollupTotalValue(v)
@@ -1670,19 +1736,21 @@ func (s *webServer) handleDNS(w http.ResponseWriter, r *http.Request) {
 		if rec.TS.Before(cutoff) {
 			return false
 		}
-		if rec.RCode != 0 {
-			errCount++
-		}
 		if clientFilter != "" && rec.Client != clientFilter {
 			return true
 		}
 		if qtype != "" && qtype != "all" && rec.QType != qtype {
 			return true
 		}
-		if errorsOnly && rec.RCode == 0 {
+		if search != "" && !strings.Contains(strings.ToLower(rec.Query), search) {
 			return true
 		}
-		if search != "" && !strings.Contains(strings.ToLower(rec.Query), search) {
+		// Counted after the client/qtype/search filters so the badge matches the
+		// list the user is looking at ("12 errors" over 2 visible rows was a lie).
+		if rec.RCode != 0 {
+			errCount++
+		}
+		if errorsOnly && rec.RCode == 0 {
 			return true
 		}
 		out = append(out, rec)
