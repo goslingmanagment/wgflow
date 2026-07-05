@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	bolt "go.etcd.io/bbolt"
@@ -235,6 +236,43 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+// openRollupReadOnly is the single place the web server opens the rollup DB.
+// The 5s flock timeout matters: the capture process holds the write lock, and
+// hanging a request forever on a wedged DB would be worse than failing it.
+func openRollupReadOnly(path string) (*bolt.DB, error) {
+	return bolt.Open(path, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+}
+
+// logRateLimited prints at most one message per key per interval. Readers run
+// on every dashboard poll, so a broken DB or log file must not flood the
+// journal — but it must not be invisible either.
+var (
+	logRateMu   sync.Mutex
+	logRateLast = map[string]time.Time{}
+)
+
+func logRateLimited(key, format string, args ...any) {
+	const interval = 30 * time.Second
+	logRateMu.Lock()
+	last, ok := logRateLast[key]
+	if ok && time.Since(last) < interval {
+		logRateMu.Unlock()
+		return
+	}
+	logRateLast[key] = time.Now()
+	logRateMu.Unlock()
+	log.Printf(format, args...)
+}
+
+// scanLogReverse walks a JSONL log newest-first, surfacing (rate-limited) any
+// failure other than the file simply not existing yet. Swallowing these errors
+// made an unreadable log indistinguishable from a quiet network.
+func scanLogReverse(path string, fn func([]byte) bool) {
+	if err := eachLineReverse(path, fn); err != nil && !os.IsNotExist(err) {
+		logRateLimited("scan:"+path, "wgflow web: scan %s: %v", path, err)
+	}
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
@@ -467,7 +505,7 @@ func (s *webServer) flowAttributions(from, to time.Time, clientFilter string) ma
 		}
 	}
 
-	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -494,7 +532,7 @@ func (s *webServer) flowAttributions(from, to time.Time, clientFilter string) ma
 		return true
 	})
 
-	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
 		var rec DNSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -746,6 +784,13 @@ func boolPick(cond bool, ifTrue, ifFalse string) string {
 	return ifFalse
 }
 
+// unknownVerdict is what the classifier degrades to when the rollup DB cannot
+// be read: with no byte evidence at all we must not brand a device "silent,
+// high confidence" — an outage must never read as quiet.
+func unknownVerdict() apiVerdict {
+	return apiVerdict{Status: "unknown", Confidence: "low", Reasons: []string{"rollup unavailable"}}
+}
+
 func (s *webServer) handleSystem(w http.ResponseWriter, r *http.Request) {
 	var st RuntimeStats
 	if b, err := os.ReadFile(filepath.Join(s.logDir, "stats.json")); err == nil {
@@ -771,19 +816,30 @@ type tPoint struct {
 func (s *webServer) handleThroughput(w http.ResponseWriter, r *http.Request) {
 	d := parseSince(r, 15*time.Minute)
 	now := time.Now()
-	series := s.throughputSeries(now.Add(-d), now)
-	writeJSON(w, map[string]any{"since": d.String(), "points": series})
+	series, dbErr := s.throughputWindow(now.Add(-d), now)
+	if dbErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
+	}
+	writeJSON(w, map[string]any{"since": d.String(), "db_ok": dbErr == nil, "points": series})
 }
 
+// throughputSeries keeps the historical error-swallowing signature for callers
+// that only care about a best-effort series; handlers use throughputWindow so
+// they can report db_ok honestly.
 func (s *webServer) throughputSeries(cutoff, now time.Time) []tPoint {
+	series, _ := s.throughputWindow(cutoff, now)
+	return series
+}
+
+func (s *webServer) throughputWindow(cutoff, now time.Time) ([]tPoint, error) {
 	per := map[int64]*tPoint{}
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	db, err := openRollupReadOnly(s.rollupPath)
 	if err != nil {
-		return zeroThroughputSeries(cutoff, now, per)
+		return zeroThroughputSeries(cutoff, now, per), err
 	}
 	defer db.Close()
 	cutoffMinute := cutoff.Unix() / 60
-	_ = db.View(func(tx *bolt.Tx) error {
+	err = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(rollupClientBucket)
 		if b == nil {
 			return nil
@@ -810,7 +866,7 @@ func (s *webServer) throughputSeries(cutoff, now time.Time) []tPoint {
 		}
 		return nil
 	})
-	return zeroThroughputSeries(cutoff, now, per)
+	return zeroThroughputSeries(cutoff, now, per), err
 }
 
 func zeroThroughputSeries(cutoff, now time.Time, per map[int64]*tPoint) []tPoint {
@@ -839,7 +895,11 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 	// Read totals + cats + per-minute series straight from the binary buckets
 	// (the same fast path as the snapshot) instead of the heavy flow_minute_v1
 	// JSON scan — the board never used the per-target detail that scan produced.
-	snaps := s.snapshotFromRollup(cutoff, now)
+	snaps, dbErr := s.snapshotWindow(cutoff, now)
+	if dbErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
+	}
+	dbOK := dbErr == nil
 	// Surface configured-but-silent devices so the board shows who's offline, not
 	// just who had traffic (the roster comes from clients.yaml).
 	for _, dev := range s.aliases.Roster() {
@@ -866,12 +926,15 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 		if len(cats) > 0 {
 			c.TopCategory = cats[0].Category
 		}
-		v := classify(sc.series, startMinute, c.Total, cats, c.DeviceKind, lastTLS[name], lastDNS[name], now, loggerOK)
+		v := unknownVerdict()
+		if dbOK {
+			v = classify(sc.series, startMinute, c.Total, cats, c.DeviceKind, lastTLS[name], lastDNS[name], now, loggerOK)
+		}
 		c.Verdict = &v
 		clients = append(clients, c)
 	}
 	sort.Slice(clients, func(i, j int) bool { return clients[i].Total > clients[j].Total })
-	writeJSON(w, map[string]any{"since": d.String(), "logger_ok": loggerOK, "clients": clients})
+	writeJSON(w, map[string]any{"since": d.String(), "logger_ok": loggerOK, "db_ok": dbOK, "clients": clients})
 }
 
 type apiSnapshotClient struct {
@@ -903,7 +966,11 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	startMinute := cutoff.Unix() / 60
 	loggerOK := s.loggerHealthy()
 
-	snaps := s.snapshotFromRollup(cutoff, now)
+	snaps, dbErr := s.snapshotWindow(cutoff, now)
+	if dbErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
+	}
+	dbOK := dbErr == nil
 	sites, lastTLS := s.recentSitesByClient(cutoff, 4)
 	lastDNS := s.lastDNSByClient(cutoff)
 
@@ -927,7 +994,10 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		cats := mapToShares(sc.cats)
 		devKind := s.resolveDeviceKind(name)
 		total := sc.down + sc.up
-		v := classify(sc.series, startMinute, total, cats, devKind, lastTLS[name], lastDNS[name], now, loggerOK)
+		v := unknownVerdict()
+		if dbOK {
+			v = classify(sc.series, startMinute, total, cats, devKind, lastTLS[name], lastDNS[name], now, loggerOK)
+		}
 		entry := apiSnapshotClient{
 			Name: name, Person: s.aliases.Person(name), DeviceKind: devKind,
 			Down: sc.down, Up: sc.up, Total: total,
@@ -947,6 +1017,7 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		"since":        d.String(),
 		"generated_at": now.Unix(),
 		"logger_ok":    loggerOK,
+		"db_ok":        dbOK,
 		"clients":      out,
 	})
 }
@@ -958,24 +1029,31 @@ type snapClient struct {
 	cats                    map[string]uint64
 }
 
-// snapshotFromRollup reads per-client minute totals (zero-filled series + down/up
+// snapshotFromRollup keeps the historical error-swallowing signature; handlers
+// use snapshotWindow so an unreadable DB surfaces as db_ok=false, not zeros.
+func (s *webServer) snapshotFromRollup(cutoff, now time.Time) map[string]*snapClient {
+	res, _ := s.snapshotWindow(cutoff, now)
+	return res
+}
+
+// snapshotWindow reads per-client minute totals (zero-filled series + down/up
 // + >100KB/>1MB minute counts) and per-client category sums straight from the
 // binary buckets — one bbolt open, no JSON-target scan.
-func (s *webServer) snapshotFromRollup(cutoff, now time.Time) map[string]*snapClient {
+func (s *webServer) snapshotWindow(cutoff, now time.Time) (map[string]*snapClient, error) {
 	res := map[string]*snapClient{}
 	startMin := cutoff.Unix() / 60
 	endMin := now.Unix() / 60
 	n := int(endMin - startMin + 1)
 	if n <= 0 {
-		return res
+		return res, nil
 	}
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	db, err := openRollupReadOnly(s.rollupPath)
 	if err != nil {
-		return res
+		return res, err
 	}
 	defer db.Close()
 	const kb, mb = 1 << 10, 1 << 20
-	_ = db.View(func(tx *bolt.Tx) error {
+	err = db.View(func(tx *bolt.Tx) error {
 		if b := tx.Bucket(rollupClientBucket); b != nil {
 			c := b.Cursor()
 			start := []byte(fmt.Sprintf("%012d", startMin))
@@ -1035,7 +1113,7 @@ func (s *webServer) snapshotFromRollup(cutoff, now time.Time) map[string]*snapCl
 			}
 		}
 	}
-	return res
+	return res, err
 }
 
 // recentSitesByClient collects up to limit distinct recent SNIs per client
@@ -1044,7 +1122,7 @@ func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string
 	sites := map[string][]string{}
 	seen := map[string]map[string]bool{}
 	last := map[string]time.Time{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1077,7 +1155,7 @@ func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string
 func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[string]time.Time) {
 	res := map[string]string{}
 	last := map[string]time.Time{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1100,7 +1178,7 @@ func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[
 // most recent query time — the second half of the classifier's freshness signal.
 func (s *webServer) lastDNSByClient(cutoff time.Time) map[string]time.Time {
 	last := map[string]time.Time{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
 		var rec DNSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1133,20 +1211,20 @@ func (s *webServer) loggerHealthy() bool {
 
 // seriesByClient returns a zero-filled per-minute byte total (download+upload)
 // for every client over [cutoff, now], for rendering per-client sparklines.
-func (s *webServer) seriesByClient(cutoff, now time.Time) map[string][]uint64 {
+func (s *webServer) seriesByClient(cutoff, now time.Time) (map[string][]uint64, error) {
 	res := map[string][]uint64{}
 	startMin := cutoff.Unix() / 60
 	endMin := now.Unix() / 60
 	n := int(endMin - startMin + 1)
 	if n <= 0 {
-		return res
+		return res, nil
 	}
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	db, err := openRollupReadOnly(s.rollupPath)
 	if err != nil {
-		return res
+		return res, err
 	}
 	defer db.Close()
-	_ = db.View(func(tx *bolt.Tx) error {
+	err = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(rollupClientBucket)
 		if b == nil {
 			return nil
@@ -1176,7 +1254,7 @@ func (s *webServer) seriesByClient(cutoff, now time.Time) map[string][]uint64 {
 		}
 		return nil
 	})
-	return res
+	return res, err
 }
 
 type apiHour struct {
@@ -1202,13 +1280,21 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		recentLookback = 6 * time.Hour
 	}
 	recentCutoff := to.Add(-recentLookback)
-	aggList := s.clientFlowsWindow(name, from, to)
-	seriesMap := s.seriesByClient(from, to)
+	aggList, flowsErr := s.clientFlowsWindow(name, from, to)
+	seriesMap, seriesErr := s.seriesByClient(from, to)
+	dbErr := flowsErr
+	if dbErr == nil {
+		dbErr = seriesErr
+	}
+	if dbErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
+	}
+	dbOK := dbErr == nil
 	series, hasRollupRows := seriesMap[name]
 	// A name with no rollup rows in the window and no mention in the configs is
 	// a typo or a removed peer: 404 beats a fabricated all-zero client. When the
 	// rollup DB itself is unreadable we cannot prove absence, so we don't 404.
-	if !hasRollupRows && len(aggList) == 0 && !s.clientConfigured(name) && s.rollupReadable() {
+	if dbOK && !hasRollupRows && len(aggList) == 0 && !s.clientConfigured(name) {
 		writeJSONError(w, http.StatusNotFound, "unknown client")
 		return
 	}
@@ -1241,7 +1327,10 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	if len(recentDNS) > 0 {
 		lastDNS = recentDNS[0].TS
 	}
-	verdict := classify(series, from.Unix()/60, down+up, cats, devKind, lastTLS, lastDNS, to, loggerOK)
+	verdict := unknownVerdict()
+	if dbOK {
+		verdict = classify(series, from.Unix()/60, down+up, cats, devKind, lastTLS, lastDNS, to, loggerOK)
+	}
 	writeJSON(w, map[string]any{
 		"name":   name,
 		"since":  to.Sub(from).Round(time.Minute).String(),
@@ -1265,6 +1354,7 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		"device_kind": devKind,
 		"person":      s.aliases.Person(name),
 		"logger_ok":   loggerOK,
+		"db_ok":       dbOK,
 		"verdict":     verdict,
 	})
 }
@@ -1292,28 +1382,18 @@ func (s *webServer) clientConfigured(name string) bool {
 	return false
 }
 
-// rollupReadable is a cheap probe for "can we trust an empty rollup answer".
-func (s *webServer) rollupReadable() bool {
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
-	if err != nil {
-		return false
-	}
-	db.Close()
-	return true
-}
-
 // clientFlowsWindow aggregates one client's per-target flows over [from, to] from
 // flow_minute_v1, bounded on both ends (so an explicit ?to= is honored).
-func (s *webServer) clientFlowsWindow(name string, from, to time.Time) []*TopAgg {
+func (s *webServer) clientFlowsWindow(name string, from, to time.Time) ([]*TopAgg, error) {
 	fromMin := from.Unix() / 60
 	toMin := to.Unix() / 60
 	aggs := map[string]*TopAgg{}
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	db, err := openRollupReadOnly(s.rollupPath)
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer db.Close()
-	_ = db.View(func(tx *bolt.Tx) error {
+	err = db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(rollupBucket)
 		if b == nil {
 			return nil
@@ -1348,7 +1428,7 @@ func (s *webServer) clientFlowsWindow(name string, from, to time.Time) []*TopAgg
 	for _, a := range aggs {
 		out = append(out, a)
 	}
-	return out
+	return out, err
 }
 
 type apiMinute struct {
@@ -1379,12 +1459,13 @@ func (s *webServer) clientMinuteRibbon(name string, from, to time.Time) []apiMin
 	for i := range out {
 		out[i].T = (fromMin + int64(i)) * 60
 	}
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	db, err := openRollupReadOnly(s.rollupPath)
 	if err != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", err)
 		return out
 	}
 	defer db.Close()
-	_ = db.View(func(tx *bolt.Tx) error {
+	viewErr := db.View(func(tx *bolt.Tx) error {
 		if b := tx.Bucket(rollupClientBucket); b != nil {
 			c := b.Cursor()
 			start := []byte(fmt.Sprintf("%012d", fromMin))
@@ -1439,6 +1520,9 @@ func (s *webServer) clientMinuteRibbon(name string, from, to time.Time) []apiMin
 		}
 		return nil
 	})
+	if viewErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", viewErr)
+	}
 	for i := range out {
 		if cats[i] != nil {
 			out[i].TopCategory = topKey(cats[i])
@@ -1461,7 +1545,7 @@ func (s *webServer) handleClientMinute(w http.ResponseWriter, r *http.Request, n
 	end := at.Add(time.Minute)
 	tls := []string{}
 	tlsSeen := map[string]bool{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1480,7 +1564,7 @@ func (s *webServer) handleClientMinute(w http.ResponseWriter, r *http.Request, n
 	})
 	dns := []string{}
 	dnsSeen := map[string]bool{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
 		var rec DNSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1502,7 +1586,7 @@ func (s *webServer) handleClientMinute(w http.ResponseWriter, r *http.Request, n
 
 func (s *webServer) recentDNSForClient(name string, cutoff, to time.Time, limit int) []DNSRecord {
 	out := []DNSRecord{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
 		var rec DNSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1526,7 +1610,7 @@ func (s *webServer) recentDNSForClient(name string, cutoff, to time.Time, limit 
 
 func (s *webServer) recentTLSForClient(name string, cutoff, to time.Time, limit int) []TLSRecord {
 	out := []TLSRecord{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1566,12 +1650,13 @@ func (s *webServer) clientDayTimeline(name string) []apiHour {
 	if ok := s.clientDayTimelineFromIndex(name, buckets, fromMinute, nowMinute); ok {
 		return buckets
 	}
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	db, err := openRollupReadOnly(s.rollupPath)
 	if err != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", err)
 		return buckets
 	}
 	defer db.Close()
-	_ = db.View(func(tx *bolt.Tx) error {
+	if err := db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket(rollupBucket)
 		if b == nil {
 			return nil
@@ -1592,13 +1677,16 @@ func (s *webServer) clientDayTimeline(name string) []apiHour {
 			buckets[h].Total += bt
 		}
 		return nil
-	})
+	}); err != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", err)
+	}
 	return buckets
 }
 
 func (s *webServer) clientDayTimelineFromIndex(name string, buckets []apiHour, fromMinute, toMinute int64) bool {
-	db, err := bolt.Open(s.rollupPath, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	db, err := openRollupReadOnly(s.rollupPath)
 	if err != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", err)
 		return false
 	}
 	defer db.Close()
@@ -1643,7 +1731,10 @@ func (s *webServer) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	search := strings.ToLower(q.Get("q"))
 	limit := atoiDefault(q.Get("limit"), 50)
 	aggs := map[string]*TopAgg{}
-	aggregateFromRollup(s.rollupPath, cutoff, clientFilter, aggs)
+	_, dbErr := aggregateFromRollup(s.rollupPath, cutoff, clientFilter, aggs)
+	if dbErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
+	}
 	attrs := s.flowAttributions(cutoff, now, clientFilter)
 	rows := make([]apiFlow, 0, len(aggs))
 	for _, a := range aggs {
@@ -1665,7 +1756,7 @@ func (s *webServer) handleTraffic(w http.ResponseWriter, r *http.Request) {
 	if limit > 0 && limit < len(rows) {
 		rows = rows[:limit]
 	}
-	writeJSON(w, map[string]any{"since": d.String(), "total": total, "rows": rows})
+	writeJSON(w, map[string]any{"since": d.String(), "db_ok": dbErr == nil, "total": total, "rows": rows})
 }
 
 type apiCategory struct {
@@ -1682,7 +1773,10 @@ func (s *webServer) handleCategories(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	cutoff := now.Add(-d)
 	aggs := map[string]*TopAgg{}
-	aggregateFromRollup(s.rollupPath, cutoff, "", aggs)
+	_, dbErr := aggregateFromRollup(s.rollupPath, cutoff, "", aggs)
+	if dbErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
+	}
 	attrs := s.flowAttributions(cutoff, now, "")
 	type acc struct {
 		down, up uint64
@@ -1714,7 +1808,7 @@ func (s *webServer) handleCategories(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Total > out[j].Total })
-	writeJSON(w, map[string]any{"since": d.String(), "categories": out})
+	writeJSON(w, map[string]any{"since": d.String(), "db_ok": dbErr == nil, "categories": out})
 }
 
 func (s *webServer) handleDNS(w http.ResponseWriter, r *http.Request) {
@@ -1728,7 +1822,7 @@ func (s *webServer) handleDNS(w http.ResponseWriter, r *http.Request) {
 	limit := atoiDefault(q.Get("limit"), 100)
 	out := []DNSRecord{}
 	errCount := 0
-	_ = eachLineReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "dns.jsonl"), func(line []byte) bool {
 		var rec DNSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1784,7 +1878,7 @@ func (s *webServer) handleTLS(w http.ResponseWriter, r *http.Request) {
 	}
 	groups := map[string]*sg{}
 	recent := []TLSRecord{}
-	_ = eachLineReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
+	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
 			return true
@@ -1836,7 +1930,10 @@ type apiReportRow struct {
 func (s *webServer) handleReport(w http.ResponseWriter, r *http.Request) {
 	d := parseSince(r, 24*time.Hour)
 	cutoff := time.Now().Add(-d)
-	byClient, byCategory, rows, _ := aggregateReportTotalsFromRollup(s.rollupPath, cutoff)
+	byClient, byCategory, rows, dbErr := aggregateReportTotalsFromRollup(s.rollupPath, cutoff)
+	if dbErr != nil {
+		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
+	}
 	toRows := func(m map[string]*TopAgg, nameFn func(*TopAgg) string) []apiReportRow {
 		out := make([]apiReportRow, 0, len(m))
 		for _, a := range m {
@@ -1847,6 +1944,7 @@ func (s *webServer) handleReport(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, map[string]any{
 		"since":       d.String(),
+		"db_ok":       dbErr == nil,
 		"rollup_rows": rows,
 		"by_client":   toRows(byClient, func(a *TopAgg) string { return a.Client }),
 		"by_category": toRows(byCategory, func(a *TopAgg) string { return a.Category }),
@@ -1901,6 +1999,10 @@ func eachLineReverse(path string, fn func([]byte) bool) error {
 		return err
 	}
 	const block = 256 * 1024
+	// A JSONL line is at most a few KB; anything beyond this is binary junk or
+	// corruption in place of the log. Without a cap, a newline-free file would
+	// accumulate into one carry the size of the whole file.
+	const maxCarry = 1 << 20
 	var carry []byte
 	for pos := st.Size(); pos > 0; {
 		n := int64(block)
@@ -1916,6 +2018,11 @@ func eachLineReverse(path string, fn func([]byte) bool) error {
 		lines := strings.Split(string(buf), "\n")
 		if pos > 0 {
 			carry = []byte(lines[0])
+			if len(carry) > maxCarry {
+				// Drop the oversized "line"; its fragments fail JSON parsing in
+				// callers and get skipped, which beats buffering the file in RAM.
+				carry = nil
+			}
 			lines = lines[1:]
 		} else {
 			carry = nil
