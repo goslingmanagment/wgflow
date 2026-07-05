@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/binary"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -17,34 +18,120 @@ type TLSRecord struct {
 	Protocol   string    `json:"protocol,omitempty"`
 }
 
+// tlsParseStatus tells the caller whether a parse result is final or whether
+// the input is a valid prefix of a ClientHello that continues in bytes we
+// have not seen yet. Only the latter justifies paying for reassembly.
+type tlsParseStatus int
+
+const (
+	// tlsComplete: definitive answer — either an SNI was extracted or the
+	// input can never become a parsable ClientHello no matter how many more
+	// bytes arrive.
+	tlsComplete tlsParseStatus = iota
+	// tlsNeedMore: the input is a well-formed proper prefix of a TLS
+	// handshake; appending the next in-order segment may finish the parse.
+	tlsNeedMore
+)
+
+// maxTLSRecordLen rejects absurd record lengths early: TLSPlaintext caps
+// fragments at 2^14, and we allow a little slack for non-compliant stacks.
+const maxTLSRecordLen = 1<<14 + 256
+
 func parseTLSSNI(payload []byte) string {
-	if len(payload) < 9 || payload[0] != 22 {
-		return ""
+	sni, _ := parseTLSSNIStatus(payload)
+	return sni
+}
+
+// parseTLSSNIStatus parses a TLS record stream (one or more handshake records
+// back to back, as seen on a TCP connection) and extracts the ClientHello
+// SNI. Unlike the old single-record parser it supports a ClientHello that
+// spans several records and reports tlsNeedMore when the stream is cut short,
+// which is what post-quantum ClientHellos (>1700 bytes, above the ~1420
+// tunnel MTU) look like in the first TCP segment.
+func parseTLSSNIStatus(buf []byte) (string, tlsParseStatus) {
+	var hs []byte   // handshake bytes assembled from record fragments
+	copied := false // hs owns its backing array and may be appended to
+	need := -1      // total handshake bytes required; -1 until header seen
+	for off := 0; ; {
+		if off >= len(buf) {
+			// Ended exactly on a record boundary with the ClientHello still
+			// incomplete: the next record lives in a later segment.
+			return "", tlsNeedMore
+		}
+		if buf[off] != 22 {
+			return "", tlsComplete
+		}
+		if len(buf)-off < 5 {
+			return "", tlsNeedMore
+		}
+		recLen := int(binary.BigEndian.Uint16(buf[off+3 : off+5]))
+		if recLen <= 0 || recLen > maxTLSRecordLen {
+			return "", tlsComplete
+		}
+		frag := buf[off+5:]
+		if len(frag) > recLen {
+			frag = frag[:recLen]
+		}
+		if hs == nil {
+			// Common case: the whole ClientHello sits in one record — alias
+			// the input instead of copying.
+			hs = frag
+		} else if !copied {
+			hs = append(append(make([]byte, 0, len(hs)+len(frag)), hs...), frag...)
+			copied = true
+		} else {
+			hs = append(hs, frag...)
+		}
+		// Validate the handshake header as soon as 4 bytes exist so garbage
+		// is rejected without waiting for more segments.
+		if need < 0 && len(hs) >= 4 {
+			if hs[0] != 1 {
+				return "", tlsComplete
+			}
+			hsLen := int(hs[1])<<16 | int(hs[2])<<8 | int(hs[3])
+			if hsLen <= 0 || 4+hsLen > tlsAsmMaxBytes {
+				// A ClientHello above the reassembly cap can never be
+				// assembled, so give up now rather than buffer for nothing.
+				return "", tlsComplete
+			}
+			need = 4 + hsLen
+		}
+		if need > 0 && len(hs) >= need {
+			return parseTLSClientHelloSNI(hs[4:need]), tlsComplete
+		}
+		if len(frag) < recLen {
+			return "", tlsNeedMore // record continues in the next segment
+		}
+		off += 5 + recLen
 	}
-	recLen := int(binary.BigEndian.Uint16(payload[3:5]))
-	if recLen <= 0 || 5+recLen > len(payload) {
-		return ""
-	}
-	hs := payload[5 : 5+recLen]
-	if len(hs) < 4 || hs[0] != 1 {
-		return ""
-	}
-	hsLen := int(hs[1])<<16 | int(hs[2])<<8 | int(hs[3])
-	if hsLen <= 0 || 4+hsLen > len(hs) {
-		return ""
-	}
-	return parseTLSClientHelloSNI(hs[4 : 4+hsLen])
 }
 
 func parseTLSHandshakeSNI(data []byte) string {
-	if len(data) < 4 || data[0] != 1 {
-		return ""
+	sni, _ := parseTLSHandshakeSNIStatus(data)
+	return sni
+}
+
+// parseTLSHandshakeSNIStatus parses raw handshake bytes (no record layer, as
+// in QUIC CRYPTO streams) and distinguishes "not a ClientHello" from "valid
+// prefix, need more bytes".
+func parseTLSHandshakeSNIStatus(data []byte) (string, tlsParseStatus) {
+	if len(data) < 4 {
+		if len(data) > 0 && data[0] != 1 {
+			return "", tlsComplete
+		}
+		return "", tlsNeedMore
+	}
+	if data[0] != 1 {
+		return "", tlsComplete
 	}
 	hsLen := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
-	if hsLen <= 0 || 4+hsLen > len(data) {
-		return ""
+	if hsLen <= 0 || 4+hsLen > tlsAsmMaxBytes {
+		return "", tlsComplete
 	}
-	return parseTLSClientHelloSNI(data[4 : 4+hsLen])
+	if 4+hsLen > len(data) {
+		return "", tlsNeedMore
+	}
+	return parseTLSClientHelloSNI(data[4 : 4+hsLen]), tlsComplete
 }
 
 func parseTLSClientHelloSNI(body []byte) string {
@@ -111,6 +198,136 @@ func parseTLSClientHelloSNI(body []byte) string {
 		}
 	}
 	return ""
+}
+
+// TCP ClientHello reassembly. Roughly 27-30% of port-443 bytes in production
+// carry no domain; a big part of that is ClientHellos (post-quantum ones are
+// >1700 bytes) that do not fit into one ~1420-byte tunnel segment, so the
+// single-packet parser never sees the SNI. The reassembler buffers the first
+// segment of a handshake and appends strictly in-order continuations until
+// the ClientHello parses or a cap fires.
+const (
+	tlsAsmMaxBytes    = 8192             // per-flow buffer cap
+	tlsAsmMaxSegments = 4                // segments per flow, first included
+	tlsAsmTTL         = 10 * time.Second // a CH split over longer than this is dead
+	tlsAsmMaxFlows    = 4096             // map cap; evicts expired first
+)
+
+// tcpFlowKey identifies one TCP connection attempt. The client port matters:
+// two parallel connections from the same client to the same server must not
+// share a reassembly buffer.
+type tcpFlowKey struct {
+	clientIP   string
+	remoteIP   string
+	clientPort uint16
+	remotePort uint16
+}
+
+type tlsAsmFlow struct {
+	buf      []byte
+	segments int
+	nextSeq  uint32 // TCP seq the next in-order segment must start at
+	expires  time.Time
+}
+
+type tlsReassembler struct {
+	mu    sync.Mutex
+	flows map[tcpFlowKey]*tlsAsmFlow
+}
+
+func newTLSReassembler() *tlsReassembler {
+	return &tlsReassembler{flows: map[tcpFlowKey]*tlsAsmFlow{}}
+}
+
+// Feed processes one outbound tcp/443 payload and returns the SNI once known.
+// The common case (complete ClientHello in a single segment) never touches
+// the flow map's contents and allocates nothing beyond the returned string;
+// buffering starts only when the parser reports a valid-but-incomplete CH.
+// reassembled is true when the SNI required more than one segment.
+func (r *tlsReassembler) Feed(key tcpFlowKey, seq uint32, payload []byte, now time.Time) (sni string, reassembled bool) {
+	if len(payload) == 0 {
+		return "", false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if flow, ok := r.flows[key]; ok {
+		if now.After(flow.expires) {
+			delete(r.flows, key)
+			// Fall through: this payload may start a fresh handshake.
+		} else if seq != flow.nextSeq {
+			// Out-of-order, retransmit, or a hole we cannot fill without real
+			// TCP tracking: a corrupt assembly would parse garbage, so drop
+			// the buffer instead. The payload itself may still start a new
+			// handshake (e.g. after a retry), so keep going below.
+			delete(r.flows, key)
+		} else {
+			if len(flow.buf)+len(payload) > tlsAsmMaxBytes {
+				delete(r.flows, key)
+				return "", false
+			}
+			flow.buf = append(flow.buf, payload...)
+			flow.segments++
+			flow.nextSeq = seq + uint32(len(payload))
+			s, status := parseTLSSNIStatus(flow.buf)
+			if status == tlsComplete {
+				delete(r.flows, key)
+				return s, s != ""
+			}
+			if flow.segments >= tlsAsmMaxSegments {
+				delete(r.flows, key)
+			}
+			return "", false
+		}
+	}
+	s, status := parseTLSSNIStatus(payload)
+	if status == tlsComplete {
+		return s, false
+	}
+	if len(r.flows) >= tlsAsmMaxFlows {
+		r.evictLocked(now)
+	}
+	r.flows[key] = &tlsAsmFlow{
+		buf:      append(make([]byte, 0, len(payload)), payload...),
+		segments: 1,
+		nextSeq:  seq + uint32(len(payload)),
+		expires:  now.Add(tlsAsmTTL),
+	}
+	return "", false
+}
+
+// evictLocked makes room in a full map: expired flows go first; if everything
+// is still live, drop arbitrary entries (map iteration order). Losing a
+// buffer only costs a potential domain label, never byte accounting.
+func (r *tlsReassembler) evictLocked(now time.Time) {
+	for k, f := range r.flows {
+		if now.After(f.expires) {
+			delete(r.flows, k)
+		}
+	}
+	for k := range r.flows {
+		if len(r.flows) < tlsAsmMaxFlows {
+			break
+		}
+		delete(r.flows, k)
+	}
+}
+
+// Prune drops expired buffers; called periodically so an idle capture does
+// not sit on up to 32 MB of dead handshake fragments.
+func (r *tlsReassembler) Prune(now time.Time) {
+	r.mu.Lock()
+	for k, f := range r.flows {
+		if now.After(f.expires) {
+			delete(r.flows, k)
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *tlsReassembler) Size() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.flows)
 }
 
 func validHostname(s string) bool {

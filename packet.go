@@ -10,6 +10,11 @@ type packetInfo struct {
 	SrcIP, DstIP     net.IP
 	Proto            uint8
 	SrcPort, DstPort uint16
+	// TCPSeq is the raw TCP sequence number (proto 6 only). The ClientHello
+	// reassembler uses it to accept only segments that strictly continue the
+	// buffered stream — without it, retransmits and reordering would silently
+	// corrupt the assembled handshake.
+	TCPSeq           uint32
 	TransportPayload []byte
 	Length           int
 }
@@ -129,6 +134,7 @@ func parsePorts(p *packetInfo, payload []byte) bool {
 		}
 		p.SrcPort = binary.BigEndian.Uint16(payload[0:2])
 		p.DstPort = binary.BigEndian.Uint16(payload[2:4])
+		p.TCPSeq = binary.BigEndian.Uint32(payload[4:8])
 		off := int(payload[12]>>4) * 4
 		if off < 20 || off > len(payload) {
 			return false

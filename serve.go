@@ -175,6 +175,7 @@ func serve(args []string) error {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
 	cache := NewDomainCache()
+	tlsAsm := newTLSReassembler()
 	flows := make(map[FlowKey]*FlowStats)
 	var flowMu sync.Mutex
 	intervalStart := time.Now()
@@ -290,8 +291,9 @@ func serve(args []string) error {
 					}
 				}
 			}
-			if outbound && pkt.Proto == 6 && pkt.DstPort == 443 {
-				if sni := parseTLSSNI(pkt.TransportPayload); sni != "" {
+			if outbound && pkt.Proto == 6 && pkt.DstPort == 443 && len(pkt.TransportPayload) > 0 {
+				key := tcpFlowKey{clientIP: clientIP, remoteIP: remoteIP, clientPort: pkt.SrcPort, remotePort: pkt.DstPort}
+				if sni, _ := tlsAsm.Feed(key, pkt.TCPSeq, pkt.TransportPayload, time.Now()); sni != "" {
 					cache.Put(clientIP, remoteIP, sni, 3600)
 					_ = tlsLog.Write(TLSRecord{
 						TS: time.Now(), Interface: cfg.Iface, Client: clientName,
@@ -413,6 +415,7 @@ func serve(args []string) error {
 			flowMu.Lock()
 			stats.currentFlowKeys.Store(uint64(len(flows)))
 			flowMu.Unlock()
+			tlsAsm.Prune(time.Now())
 			_ = stats.Write()
 		case <-pruneTicker.C:
 			runPrune()
