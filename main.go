@@ -1763,12 +1763,23 @@ func parseIPv4(b []byte) (packetInfo, bool) {
 	if total <= 0 || total > len(b) {
 		total = len(b)
 	}
+	// A crafted total_length smaller than the header would make b[ihl:total]
+	// panic with an inverted slice range and take the daemon down.
+	if total < ihl {
+		return packetInfo{}, false
+	}
 	proto := b[9]
 	p := packetInfo{
 		SrcIP:  append(net.IP(nil), b[12:16]...),
 		DstIP:  append(net.IP(nil), b[16:20]...),
 		Proto:  proto,
 		Length: total,
+	}
+	// Non-first fragments carry no transport header; parsing their payload as
+	// ports would fabricate phantom flows. Keep the packet (bytes must still
+	// be accounted) but leave ports zero.
+	if fragOffset := binary.BigEndian.Uint16(b[6:8]) & 0x1fff; fragOffset != 0 {
+		return p, true
 	}
 	payload := b[ihl:total]
 	if !parsePorts(&p, payload) {
@@ -1788,6 +1799,7 @@ func parseIPv6(b []byte) (packetInfo, bool) {
 	}
 	next := b[6]
 	off := 40
+	fragmented := false
 	for {
 		switch next {
 		case 0, 43, 60:
@@ -1801,6 +1813,11 @@ func parseIPv6(b []byte) (packetInfo, bool) {
 				return packetInfo{}, false
 			}
 			next = b[off]
+			// Fragment offset lives in the upper 13 bits of bytes 2-3; a
+			// non-zero offset means the transport header is in another packet.
+			if binary.BigEndian.Uint16(b[off+2:off+4])>>3 != 0 {
+				fragmented = true
+			}
 			off += 8
 		default:
 			goto done
@@ -1815,6 +1832,11 @@ done:
 		DstIP:  append(net.IP(nil), b[24:40]...),
 		Proto:  next,
 		Length: end,
+	}
+	// Same as IPv4: count non-first fragments but never guess ports from
+	// payload bytes that are not a transport header.
+	if fragmented {
+		return p, true
 	}
 	if !parsePorts(&p, b[off:end]) {
 		return packetInfo{}, false
@@ -1939,7 +1961,11 @@ func parseDNSAnswer(msg []byte, name string, typ uint16, ttl uint32, off, ln int
 			return DNSAnswer{Name: owner, Type: "AAAA", Value: net.IP(msg[off : off+16]).String(), TTL: ttl}, true
 		}
 	case 5:
-		target, _, ok := parseDNSName(msg, off, 0)
+		// Bound the name at the end of this record's RDATA so a truncated or
+		// crafted CNAME cannot read label bytes from the following record.
+		// Compression pointers only reference earlier offsets, so they keep
+		// working against the shortened slice.
+		target, _, ok := parseDNSName(msg[:off+ln], off, 0)
 		if ok {
 			return DNSAnswer{Name: owner, Type: "CNAME", Value: strings.TrimSuffix(target, "."), TTL: ttl}, true
 		}
@@ -1984,10 +2010,25 @@ func parseDNSName(msg []byte, off int, depth int) (string, int, bool) {
 		if off+l > len(msg) {
 			return "", 0, false
 		}
-		labels = append(labels, string(msg[off:off+l]))
+		labels = append(labels, sanitizeDNSLabel(msg[off:off+l]))
 		off += l
 	}
 	return strings.Join(labels, "."), next, true
+}
+
+// sanitizeDNSLabel copies a raw DNS label, replacing control bytes with '?'.
+// Label bytes come straight off the wire from untrusted clients: a crafted
+// query could otherwise inject terminal escapes into `top`/`report` output or
+// a tab into the tab-separated rollup key.
+func sanitizeDNSLabel(raw []byte) string {
+	clean := make([]byte, len(raw))
+	for i, c := range raw {
+		if c < 0x20 || c == 0x7f {
+			c = '?'
+		}
+		clean[i] = c
+	}
+	return string(clean)
 }
 
 func parseTLSSNI(payload []byte) string {
