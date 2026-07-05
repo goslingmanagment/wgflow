@@ -6,6 +6,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
+	"sort"
+	"sync"
+	"time"
 )
 
 var (
@@ -20,9 +23,20 @@ var (
 )
 
 func parseQUICSNI(datagram []byte) string {
+	sni, _ := parseQUICSNIAsm(datagram, nil, time.Time{})
+	return sni
+}
+
+// parseQUICSNIAsm walks every long-header packet coalesced into the datagram,
+// decrypts Initials, and extracts the ClientHello SNI. With a non-nil asm,
+// CRYPTO frames that do not yield a complete ClientHello on their own are fed
+// into the per-DCID reassembler, so a hello split across several Initial
+// packets (or CRYPTO frames) still resolves. reassembled reports whether the
+// SNI needed cross-packet state.
+func parseQUICSNIAsm(datagram []byte, asm *quicReassembler, now time.Time) (sni string, reassembled bool) {
 	for off := 0; off < len(datagram); {
 		if len(datagram)-off < 7 || datagram[off]&0x80 == 0 {
-			return ""
+			return "", false
 		}
 		first := datagram[off]
 		version := binary.BigEndian.Uint32(datagram[off+1 : off+5])
@@ -30,40 +44,48 @@ func parseQUICSNI(datagram []byte) string {
 		dcidLen := int(datagram[pos])
 		pos++
 		if dcidLen == 0 || pos+dcidLen > len(datagram) {
-			return ""
+			return "", false
 		}
 		dcid := datagram[pos : pos+dcidLen]
 		pos += dcidLen
 		if pos >= len(datagram) {
-			return ""
+			return "", false
 		}
 		scidLen := int(datagram[pos])
 		pos++
 		if pos+scidLen > len(datagram) {
-			return ""
+			return "", false
 		}
 		pos += scidLen
 		tokenLen, next, ok := readQUICVarInt(datagram, pos)
 		if !ok || tokenLen > uint64(len(datagram)-next) {
-			return ""
+			return "", false
 		}
 		pos = next + int(tokenLen)
 		packetLen, next, ok := readQUICVarInt(datagram, pos)
 		if !ok || packetLen > uint64(len(datagram)-next) {
-			return ""
+			return "", false
 		}
 		pnOffset := next
 		packetEnd := pnOffset + int(packetLen)
 		if first&0x30 == 0x00 {
 			if plaintext, ok := decryptQUICInitial(datagram, off, pnOffset, packetEnd, version, dcid); ok {
-				if sni := parseQUICCryptoSNI(plaintext); sni != "" {
-					return sni
+				sni, done, segs := walkQUICCryptoFrames(plaintext, asm != nil)
+				if sni != "" {
+					return sni, false
+				}
+				// done means an offset-0 frame held a complete ClientHello
+				// with no usable SNI — more packets cannot change that.
+				if asm != nil && !done && len(segs) > 0 {
+					if s := asm.Add(dcid, segs, now); s != "" {
+						return s, true
+					}
 				}
 			}
 		}
 		off = packetEnd
 	}
-	return ""
+	return "", false
 }
 
 func decryptQUICInitial(datagram []byte, packetStart, pnOffset, packetEnd int, version uint32, dcid []byte) ([]byte, bool) {
@@ -110,11 +132,23 @@ func decryptQUICInitial(datagram []byte, packetStart, pnOffset, packetEnd int, v
 	return plain, true
 }
 
-func parseQUICCryptoSNI(plain []byte) string {
+// quicCryptoSeg is one CRYPTO frame's slice of the handshake byte stream.
+type quicCryptoSeg struct {
+	off  uint64
+	data []byte
+}
+
+// walkQUICCryptoFrames scans the frames of a decrypted Initial payload. The
+// common case — one offset-0 CRYPTO frame holding the whole ClientHello —
+// returns the SNI directly with no allocation. done reports a definitive
+// negative (a complete hello parsed but yielded nothing), which tells the
+// caller reassembly cannot help. When collect is set, CRYPTO segments that
+// might still combine into a hello are returned for cross-packet reassembly.
+func walkQUICCryptoFrames(plain []byte, collect bool) (sni string, done bool, segs []quicCryptoSeg) {
 	for off := 0; off < len(plain); {
 		typ, next, ok := readQUICVarInt(plain, off)
 		if !ok {
-			return ""
+			return "", false, segs
 		}
 		off = next
 		switch typ {
@@ -124,33 +158,181 @@ func parseQUICCryptoSNI(plain []byte) string {
 			var ok bool
 			off, ok = skipQUICAckFrame(plain, off, typ == 0x03)
 			if !ok {
-				return ""
+				return "", false, segs
 			}
 		case 0x06: // CRYPTO
 			cryptoOff, next, ok := readQUICVarInt(plain, off)
 			if !ok {
-				return ""
+				return "", false, segs
 			}
 			ln, next, ok := readQUICVarInt(plain, next)
 			if !ok || ln > uint64(len(plain)-next) {
-				return ""
+				return "", false, segs
 			}
 			data := plain[next : next+int(ln)]
 			off = next + int(ln)
-			if cryptoOff != 0 {
-				continue
+			if cryptoOff == 0 {
+				s, status := parseTLSHandshakeSNIStatus(data)
+				if status == tlsComplete {
+					if s != "" {
+						return s, true, nil
+					}
+					// Some stacks wrap the hello in a record layer even
+					// inside CRYPTO; historical behavior, keep it.
+					if s := parseTLSSNI(data); s != "" {
+						return s, true, nil
+					}
+					return "", true, nil
+				}
 			}
-			if sni := parseTLSHandshakeSNI(data); sni != "" {
-				return sni
-			}
-			if sni := parseTLSSNI(data); sni != "" {
-				return sni
+			if collect && len(data) > 0 {
+				segs = append(segs, quicCryptoSeg{off: cryptoOff, data: data})
 			}
 		default:
-			return ""
+			return "", false, segs
 		}
 	}
+	return "", false, segs
+}
+
+// QUIC CRYPTO reassembly. Chromium and friends split the Initial flight's
+// CRYPTO stream across several Initial packets (each under the MTU), so the
+// offset-0 frame alone rarely holds the whole post-quantum ClientHello.
+// Segments are keyed by DCID: all Initials of one connection attempt carry
+// the same client-chosen DCID, and the decryption keys derive from it too.
+const (
+	quicAsmMaxBytes   = 8192             // per-DCID buffered handshake bytes
+	quicAsmMaxPackets = 3                // Initial packets per DCID
+	quicAsmTTL        = 10 * time.Second // handshakes spread longer are dead
+	quicAsmMaxDCIDs   = 1024             // map cap; evicts expired first
+)
+
+type quicAsmState struct {
+	segs    []quicCryptoSeg // sorted by offset, non-overlapping, owned copies
+	bytes   int
+	packets int
+	expires time.Time
+}
+
+type quicReassembler struct {
+	mu    sync.Mutex
+	dcids map[string]*quicAsmState
+}
+
+func newQUICReassembler() *quicReassembler {
+	return &quicReassembler{dcids: map[string]*quicAsmState{}}
+}
+
+// Add merges the CRYPTO segments decrypted from one Initial packet into the
+// DCID's buffer and re-attempts the ClientHello parse over the contiguous
+// prefix. The buffer is freed on success, on a definitive parse failure, and
+// when any cap fires.
+func (r *quicReassembler) Add(dcid []byte, segs []quicCryptoSeg, now time.Time) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	st := r.dcids[string(dcid)]
+	if st != nil && now.After(st.expires) {
+		delete(r.dcids, string(dcid))
+		st = nil
+	}
+	if st == nil {
+		if len(r.dcids) >= quicAsmMaxDCIDs {
+			r.evictLocked(now)
+		}
+		st = &quicAsmState{expires: now.Add(quicAsmTTL)}
+		r.dcids[string(dcid)] = st
+	}
+	st.packets++
+	for _, s := range segs {
+		st.insert(s)
+	}
+	if st.bytes > quicAsmMaxBytes {
+		delete(r.dcids, string(dcid))
+		return ""
+	}
+	// Only a contiguous prefix starting at stream offset 0 can be parsed.
+	if len(st.segs) == 0 || st.segs[0].off != 0 {
+		if st.packets >= quicAsmMaxPackets {
+			delete(r.dcids, string(dcid))
+		}
+		return ""
+	}
+	prefix := st.segs[0].data
+	sni, status := parseTLSHandshakeSNIStatus(prefix)
+	if status == tlsComplete {
+		delete(r.dcids, string(dcid))
+		return sni
+	}
+	if st.packets >= quicAsmMaxPackets {
+		delete(r.dcids, string(dcid))
+	}
 	return ""
+}
+
+// insert adds an owned copy of one segment, keeping segs sorted and merged.
+// Overlaps (retransmitted Initials) collapse instead of double-counting.
+func (st *quicAsmState) insert(seg quicCryptoSeg) {
+	if seg.off >= quicAsmMaxBytes || len(seg.data) == 0 {
+		return
+	}
+	data := seg.data
+	if seg.off+uint64(len(data)) > quicAsmMaxBytes {
+		data = data[:quicAsmMaxBytes-seg.off]
+	}
+	// Copy: seg.data aliases the decrypted packet buffer, which must not be
+	// pinned in the map for the buffer's lifetime.
+	st.segs = append(st.segs, quicCryptoSeg{off: seg.off, data: append([]byte(nil), data...)})
+	sort.Slice(st.segs, func(i, j int) bool { return st.segs[i].off < st.segs[j].off })
+	merged := st.segs[:1]
+	for _, s := range st.segs[1:] {
+		last := &merged[len(merged)-1]
+		lastEnd := last.off + uint64(len(last.data))
+		if s.off <= lastEnd {
+			if end := s.off + uint64(len(s.data)); end > lastEnd {
+				last.data = append(last.data, s.data[lastEnd-s.off:]...)
+			}
+		} else {
+			merged = append(merged, s)
+		}
+	}
+	st.segs = merged
+	st.bytes = 0
+	for _, s := range st.segs {
+		st.bytes += len(s.data)
+	}
+}
+
+// evictLocked frees room in a full DCID map, expired entries first, then
+// arbitrary ones. Losing a buffer costs at most one domain label.
+func (r *quicReassembler) evictLocked(now time.Time) {
+	for k, st := range r.dcids {
+		if now.After(st.expires) {
+			delete(r.dcids, k)
+		}
+	}
+	for k := range r.dcids {
+		if len(r.dcids) < quicAsmMaxDCIDs {
+			break
+		}
+		delete(r.dcids, k)
+	}
+}
+
+// Prune drops expired buffers; called periodically from the capture loop.
+func (r *quicReassembler) Prune(now time.Time) {
+	r.mu.Lock()
+	for k, st := range r.dcids {
+		if now.After(st.expires) {
+			delete(r.dcids, k)
+		}
+	}
+	r.mu.Unlock()
+}
+
+func (r *quicReassembler) Size() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.dcids)
 }
 
 func skipQUICAckFrame(b []byte, off int, withECN bool) (int, bool) {

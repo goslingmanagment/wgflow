@@ -176,6 +176,7 @@ func serve(args []string) error {
 
 	cache := NewDomainCache()
 	tlsAsm := newTLSReassembler()
+	quicAsm := newQUICReassembler()
 	flows := make(map[FlowKey]*FlowStats)
 	var flowMu sync.Mutex
 	intervalStart := time.Now()
@@ -304,7 +305,7 @@ func serve(args []string) error {
 				}
 			}
 			if outbound && pkt.Proto == 17 && pkt.DstPort == 443 {
-				if sni := parseQUICSNI(pkt.TransportPayload); sni != "" {
+				if sni, _ := parseQUICSNIAsm(pkt.TransportPayload, quicAsm, time.Now()); sni != "" {
 					cache.Put(clientIP, remoteIP, sni, 3600)
 					_ = tlsLog.Write(TLSRecord{
 						TS: time.Now(), Interface: cfg.Iface, Client: clientName,
@@ -416,6 +417,7 @@ func serve(args []string) error {
 			stats.currentFlowKeys.Store(uint64(len(flows)))
 			flowMu.Unlock()
 			tlsAsm.Prune(time.Now())
+			quicAsm.Prune(time.Now())
 			_ = stats.Write()
 		case <-pruneTicker.C:
 			runPrune()
