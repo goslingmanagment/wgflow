@@ -13,6 +13,10 @@ type DNSAnswer struct {
 	Type  string `json:"type"`
 	Value string `json:"value"`
 	TTL   uint32 `json:"ttl"`
+	// Hints are the ipv4hint/ipv6hint addresses of an HTTPS/SVCB answer.
+	// Clients connect straight to these IPs without a separate A/AAAA round
+	// trip, so they feed the DomainCache exactly like A/AAAA values do.
+	Hints []string `json:"hints,omitempty"`
 }
 
 type DNSRecord struct {
@@ -127,8 +131,64 @@ func parseDNSAnswer(msg []byte, name string, typ uint16, ttl uint32, off, ln int
 		if ok {
 			return DNSAnswer{Name: owner, Type: "CNAME", Value: strings.TrimSuffix(target, "."), TTL: ttl}, true
 		}
+	case 64, 65:
+		return parseSVCBAnswer(msg, owner, typ, ttl, off, ln)
 	}
 	return DNSAnswer{}, false
+}
+
+// maxSvcParamHints caps address hints taken from one HTTPS/SVCB record. Real
+// answers carry a handful; a crafted 64 KB RDATA could otherwise drive
+// thousands of DomainCache insertions from a single packet.
+const maxSvcParamHints = 32
+
+// parseSVCBAnswer decodes SVCB (64) and HTTPS (65) RDATA per RFC 9460:
+// SvcPriority, TargetName, then SvcParams. Only ipv4hint/ipv6hint params are
+// extracted; everything else is skipped by length. All reads stay strictly
+// inside [off, off+ln) — the input is attacker-controlled.
+func parseSVCBAnswer(msg []byte, owner string, typ uint16, ttl uint32, off, ln int) (DNSAnswer, bool) {
+	end := off + ln
+	if ln < 3 { // priority (2) + at least a root label (1)
+		return DNSAnswer{}, false
+	}
+	priority := binary.BigEndian.Uint16(msg[off : off+2])
+	// Same RDATA bounding trick as CNAME above. RFC 9460 forbids compression
+	// in TargetName, but tolerating (earlier-offset) pointers costs nothing.
+	target, next, ok := parseDNSName(msg[:end], off+2, 0)
+	if !ok {
+		return DNSAnswer{}, false
+	}
+	target = strings.TrimSuffix(target, ".")
+	if target == "" && priority != 0 {
+		// In ServiceMode the root target means "the owner itself".
+		target = owner
+	}
+	ans := DNSAnswer{Name: owner, Type: dnsType(typ), Value: target, TTL: ttl}
+	if priority == 0 {
+		// AliasMode: SvcParams are forbidden; ignore whatever follows.
+		return ans, true
+	}
+	for next+4 <= end {
+		key := binary.BigEndian.Uint16(msg[next : next+2])
+		vlen := int(binary.BigEndian.Uint16(msg[next+2 : next+4]))
+		if next+4+vlen > end {
+			// Truncated param: keep what parsed cleanly, stop here.
+			break
+		}
+		val := msg[next+4 : next+4+vlen]
+		next += 4 + vlen
+		switch key {
+		case 4: // ipv4hint
+			for i := 0; i+4 <= len(val) && len(ans.Hints) < maxSvcParamHints; i += 4 {
+				ans.Hints = append(ans.Hints, net.IP(val[i:i+4]).String())
+			}
+		case 6: // ipv6hint
+			for i := 0; i+16 <= len(val) && len(ans.Hints) < maxSvcParamHints; i += 16 {
+				ans.Hints = append(ans.Hints, net.IP(val[i:i+16]).String())
+			}
+		}
+	}
+	return ans, true
 }
 
 func parseDNSName(msg []byte, off int, depth int) (string, int, bool) {

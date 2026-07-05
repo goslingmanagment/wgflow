@@ -103,6 +103,163 @@ func TestParseDNSMessageAnswerNames(t *testing.T) {
 	}
 }
 
+// testHTTPSAnswerMsg builds a response with one HTTPS (or SVCB) answer whose
+// RDATA is provided raw, so tests control priority/target/params precisely.
+func testHTTPSAnswerMsg(qname string, typ uint16, rdata []byte) []byte {
+	msg := []byte{0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00}
+	msg = appendDNSNameTest(msg, qname)
+	msg = append(msg, byte(typ>>8), byte(typ), 0x00, 0x01) // question
+	msg = append(msg,
+		0xc0, 0x0c, // answer owner -> question name
+		byte(typ>>8), byte(typ),
+		0x00, 0x01, // IN
+		0x00, 0x00, 0x0e, 0x10, // TTL 3600
+		byte(len(rdata)>>8), byte(len(rdata)),
+	)
+	return append(msg, rdata...)
+}
+
+func TestParseDNSAnswerHTTPSWithHints(t *testing.T) {
+	rdata := []byte{0x00, 0x01} // ServiceMode, priority 1
+	rdata = append(rdata, 0x00) // TargetName "." = owner
+	rdata = append(rdata,
+		0x00, 0x01, 0x00, 0x03, 'h', '2', 0x02, // alpn (skipped by length... key=1 len=3)
+	)
+	rdata = append(rdata,
+		0x00, 0x04, 0x00, 0x08, // ipv4hint, two addresses
+		192, 0, 2, 10,
+		192, 0, 2, 11,
+	)
+	rdata = append(rdata,
+		0x00, 0x06, 0x00, 0x10, // ipv6hint, one address
+		0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x99,
+	)
+	msg := testHTTPSAnswerMsg("api.example.com", 65, rdata)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok || len(parsed.Answers) != 1 {
+		t.Fatalf("parse = %+v ok=%v, want one answer", parsed.Answers, ok)
+	}
+	ans := parsed.Answers[0]
+	if ans.Type != "HTTPS" || ans.Name != "api.example.com" || ans.TTL != 3600 {
+		t.Fatalf("answer = %+v", ans)
+	}
+	if ans.Value != "api.example.com" {
+		t.Fatalf("ServiceMode root target must resolve to owner, got %q", ans.Value)
+	}
+	want := []string{"192.0.2.10", "192.0.2.11", "2001:db8::99"}
+	if len(ans.Hints) != len(want) {
+		t.Fatalf("hints = %v, want %v", ans.Hints, want)
+	}
+	for i := range want {
+		if ans.Hints[i] != want[i] {
+			t.Fatalf("hints[%d] = %q, want %q", i, ans.Hints[i], want[i])
+		}
+	}
+}
+
+func TestParseDNSAnswerSVCBTargetName(t *testing.T) {
+	rdata := []byte{0x00, 0x02} // ServiceMode, priority 2
+	rdata = appendDNSNameTest(rdata, "svc.cdn.example.net")
+	rdata = append(rdata,
+		0x00, 0x04, 0x00, 0x04,
+		198, 51, 100, 7,
+	)
+	msg := testHTTPSAnswerMsg("_dns.example.com", 64, rdata)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok || len(parsed.Answers) != 1 {
+		t.Fatalf("parse = %+v ok=%v, want one answer", parsed.Answers, ok)
+	}
+	ans := parsed.Answers[0]
+	if ans.Type != "SVCB" || ans.Value != "svc.cdn.example.net" {
+		t.Fatalf("answer = %+v", ans)
+	}
+	if len(ans.Hints) != 1 || ans.Hints[0] != "198.51.100.7" {
+		t.Fatalf("hints = %v, want [198.51.100.7]", ans.Hints)
+	}
+}
+
+func TestParseDNSAnswerHTTPSAliasMode(t *testing.T) {
+	rdata := []byte{0x00, 0x00} // AliasMode
+	rdata = appendDNSNameTest(rdata, "alias.example.org")
+	// SvcParams are forbidden in AliasMode; anything trailing is ignored.
+	rdata = append(rdata, 0x00, 0x04, 0x00, 0x04, 203, 0, 113, 5)
+	msg := testHTTPSAnswerMsg("www.example.com", 65, rdata)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok || len(parsed.Answers) != 1 {
+		t.Fatalf("parse = %+v ok=%v, want one answer", parsed.Answers, ok)
+	}
+	ans := parsed.Answers[0]
+	if ans.Value != "alias.example.org" {
+		t.Fatalf("alias target = %q, want alias.example.org", ans.Value)
+	}
+	if len(ans.Hints) != 0 {
+		t.Fatalf("AliasMode must not yield hints, got %v", ans.Hints)
+	}
+}
+
+func TestParseDNSAnswerHTTPSTruncatedParams(t *testing.T) {
+	rdata := []byte{0x00, 0x01}
+	rdata = append(rdata, 0x00) // target "."
+	rdata = append(rdata,
+		0x00, 0x04, 0x00, 0x08, // claims 8 bytes of ipv4hint...
+		192, 0, 2, 44, // ...but only 4 are present
+	)
+	msg := testHTTPSAnswerMsg("cut.example.com", 65, rdata)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok || len(parsed.Answers) != 1 {
+		t.Fatalf("parse = %+v ok=%v, want one answer", parsed.Answers, ok)
+	}
+	if hints := parsed.Answers[0].Hints; len(hints) != 0 {
+		t.Fatalf("truncated ipv4hint must be discarded, got %v", hints)
+	}
+}
+
+// A SvcParam whose declared length runs past the RDATA end must never read
+// the following record's bytes as hint addresses.
+func TestParseDNSAnswerHTTPSParamMustNotLeakPastRData(t *testing.T) {
+	msg := []byte{0x12, 0x34, 0x81, 0x80, 0x00, 0x01, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00}
+	msg = appendDNSNameTest(msg, "cut.example.com")
+	msg = append(msg, 0x00, 0x41, 0x00, 0x01) // question HTTPS IN
+	// Answer 1: HTTPS whose ipv4hint claims 8 bytes but RDATA ends after the
+	// param header — the "value" would be the next record's bytes.
+	rdata := []byte{0x00, 0x01, 0x00, 0x00, 0x04, 0x00, 0x08}
+	msg = append(msg, 0xc0, 0x0c, 0x00, 0x41, 0x00, 0x01, 0x00, 0x00, 0x0e, 0x10, 0x00, byte(len(rdata)))
+	msg = append(msg, rdata...)
+	// Answer 2: A 10.0.0.1, immediately after.
+	msg = append(msg, 0xc0, 0x0c, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x2c, 0x00, 0x04, 10, 0, 0, 1)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok || len(parsed.Answers) != 2 {
+		t.Fatalf("parse = %+v ok=%v, want two answers", parsed.Answers, ok)
+	}
+	for _, ans := range parsed.Answers {
+		for _, h := range ans.Hints {
+			if h == "10.0.0.1" {
+				t.Fatalf("hint leaked past RDATA boundary: %+v", ans)
+			}
+		}
+	}
+	if parsed.Answers[1].Type != "A" || parsed.Answers[1].Value != "10.0.0.1" {
+		t.Fatalf("trailing A answer damaged: %+v", parsed.Answers[1])
+	}
+}
+
+func TestParseDNSAnswerHTTPSHintCap(t *testing.T) {
+	rdata := []byte{0x00, 0x01, 0x00} // priority 1, target "."
+	count := maxSvcParamHints + 8
+	rdata = append(rdata, 0x00, 0x04, byte(count*4>>8), byte(count*4))
+	for i := 0; i < count; i++ {
+		rdata = append(rdata, 10, 0, byte(i>>8), byte(i))
+	}
+	msg := testHTTPSAnswerMsg("many.example.com", 65, rdata)
+	parsed, ok := parseDNSMessage(msg)
+	if !ok || len(parsed.Answers) != 1 {
+		t.Fatalf("parse = %+v ok=%v, want one answer", parsed.Answers, ok)
+	}
+	if got := len(parsed.Answers[0].Hints); got != maxSvcParamHints {
+		t.Fatalf("hints = %d, want capped at %d", got, maxSvcParamHints)
+	}
+}
+
 func appendDNSNameTest(dst []byte, name string) []byte {
 	for _, label := range strings.Split(name, ".") {
 		dst = append(dst, byte(len(label)))

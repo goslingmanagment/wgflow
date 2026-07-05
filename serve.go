@@ -286,8 +286,21 @@ func serve(args []string) error {
 					_ = dnsLog.Write(rec)
 					stats.dnsRecords.Add(1)
 					for _, ans := range answers {
-						if ans.Type == "A" || ans.Type == "AAAA" {
+						switch ans.Type {
+						case "A", "AAAA":
 							cache.Put(clientIP, ans.Value, rec.Query, ans.TTL)
+						case "HTTPS", "SVCB":
+							// Clients dial ipv4hint/ipv6hint addresses without
+							// any A/AAAA lookup, so the hints are the only
+							// chance to name those flows. The owner name is
+							// what the client asked to reach.
+							owner := ans.Name
+							if owner == "" {
+								owner = rec.Query
+							}
+							for _, hintIP := range ans.Hints {
+								cache.Put(clientIP, hintIP, owner, ans.TTL)
+							}
 						}
 					}
 				}
