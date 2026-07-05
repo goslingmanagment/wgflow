@@ -942,7 +942,11 @@ type apiClient struct {
 	Cats        []apiCatShare `json:"cats"`
 	DeviceKind  string        `json:"device_kind"`
 	Person      string        `json:"person"`
-	Verdict     *apiVerdict   `json:"verdict,omitempty"`
+	// EncryptedDNS: the window shows DoH/DoT evidence (known resolver SNI or
+	// port 853), so dns.jsonl is incomplete for this client and domain
+	// attribution may undercount.
+	EncryptedDNS bool        `json:"encrypted_dns"`
+	Verdict      *apiVerdict `json:"verdict,omitempty"`
 }
 
 // apiVerdict is the rich, falsifiable output of the classifier. It describes the
@@ -1229,21 +1233,22 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 			snaps[dev] = &snapClient{cats: map[string]uint64{}}
 		}
 	}
-	sites, lastTLS := s.lastSitesByClient(cutoff)
+	sites, lastTLS, encDNS := s.lastSitesByClient(cutoff)
 	lastDNS := s.lastDNSByClient(cutoff)
 	clients := make([]*apiClient, 0, len(snaps))
 	for name, sc := range snaps {
 		cats := mapToShares(sc.cats)
 		c := &apiClient{
-			Name:        name,
-			Down:        sc.down,
-			Up:          sc.up,
-			Total:       sc.down + sc.up,
-			Cats:        cats,
-			Series:      sc.series,
-			CurrentSite: sites[name],
-			DeviceKind:  s.resolveDeviceKind(name),
-			Person:      s.aliases.Person(name),
+			Name:         name,
+			Down:         sc.down,
+			Up:           sc.up,
+			Total:        sc.down + sc.up,
+			Cats:         cats,
+			Series:       sc.series,
+			CurrentSite:  sites[name],
+			DeviceKind:   s.resolveDeviceKind(name),
+			Person:       s.aliases.Person(name),
+			EncryptedDNS: encDNS[name],
 		}
 		if len(cats) > 0 {
 			c.TopCategory = cats[0].Category
@@ -1270,6 +1275,7 @@ type apiSnapshotClient struct {
 	MinutesOver1MB  int           `json:"minutes_over_1mb"`
 	Cats            []apiCatShare `json:"cats"`
 	RecentSites     []string      `json:"recent_sites"`
+	EncryptedDNS    bool          `json:"encrypted_dns"`
 	LastTLS         *time.Time    `json:"last_tls,omitempty"`
 	LastDNS         *time.Time    `json:"last_dns,omitempty"`
 	Verdict         apiVerdict    `json:"verdict"`
@@ -1293,7 +1299,7 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
 	}
 	dbOK := dbErr == nil
-	sites, lastTLS := s.recentSitesByClient(cutoff, snapshotSitesPerClient)
+	sites, lastTLS, encDNS := s.recentSitesByClient(cutoff, snapshotSitesPerClient)
 	lastDNS := s.lastDNSByClient(cutoff)
 
 	want := map[string]bool{}
@@ -1324,7 +1330,7 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 			Name: name, Person: s.aliases.Person(name), DeviceKind: devKind,
 			Down: sc.down, Up: sc.up, Total: total,
 			MinutesOver100K: sc.minOver100k, MinutesOver1MB: sc.minOver1mb,
-			Cats: cats, RecentSites: sites[name], Verdict: v,
+			Cats: cats, RecentSites: sites[name], EncryptedDNS: encDNS[name], Verdict: v,
 		}
 		if t := lastTLS[name]; !t.IsZero() {
 			entry.LastTLS = &t
@@ -1411,12 +1417,42 @@ func (s *webServer) snapshotWindow(cutoff, now time.Time) (map[string]*snapClien
 	return res, err
 }
 
+// encryptedDNSNames are SNIs that identify well-known DoH/DoT resolvers, plus
+// the iCloud Private Relay hosts (which bundle ODoH). A handshake to one of
+// these means the client's DNS is (partly) invisible to dns.jsonl — domain
+// attribution may undercount, and the UI must say so instead of implying a
+// complete log.
+var encryptedDNSNames = map[string]bool{
+	"one.one.one.one":     true,
+	"dns.google":          true,
+	"cloudflare-dns.com":  true,
+	"dns.adguard-dns.com": true,
+	"doh.opendns.com":     true,
+	"mask.icloud.com":     true,
+	"mask-h2.icloud.com":  true,
+	"mask-api.icloud.com": true,
+	"dns.quad9.net":       true,
+}
+
+// tlsRecordSuggestsEncryptedDNS reports whether one tls.jsonl record is
+// evidence of encrypted DNS: a known resolver SNI, or any handshake on the
+// dedicated DoT/DoQ port.
+func tlsRecordSuggestsEncryptedDNS(rec TLSRecord) bool {
+	return encryptedDNSNames[strings.ToLower(rec.ServerName)] || rec.RemotePort == 853
+}
+
 // recentSitesByClient collects up to limit distinct recent SNIs per client
-// (newest first) plus the last TLS time, from one tls.jsonl tail scan.
-func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string][]string, map[string]time.Time) {
+// (newest first) plus the last TLS time, from one tls.jsonl tail scan. The
+// same walk also flags clients with encrypted-DNS evidence in the window
+// (known DoH/DoT SNI or port 853) — deliberately piggybacked here so the
+// board/snapshot endpoints get the signal without a second file scan. Flows
+// to port 853 without a captured handshake are covered on the client-detail
+// endpoint, which already loads per-target flows.
+func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string][]string, map[string]time.Time, map[string]bool) {
 	sites := map[string][]string{}
 	seen := map[string]map[string]bool{}
 	last := map[string]time.Time{}
+	encDNS := map[string]bool{}
 	scanLogReverse(filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
@@ -1427,6 +1463,9 @@ func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string
 		}
 		if _, ok := last[rec.Client]; !ok {
 			last[rec.Client] = rec.TS
+		}
+		if tlsRecordSuggestsEncryptedDNS(rec) {
+			encDNS[rec.Client] = true
 		}
 		if rec.ServerName == "" {
 			return true
@@ -1441,21 +1480,22 @@ func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string
 		sites[rec.Client] = append(sites[rec.Client], rec.ServerName)
 		return true
 	})
-	return sites, last
+	return sites, last, encDNS
 }
 
 // lastSitesByClient returns, per client, the most recent SNI plus its timestamp
 // (the timestamp feeds the classifier's "fresh TLS" signal — nearly free since
-// the file is walked anyway). It is the limit=1 case of recentSitesByClient.
-func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[string]time.Time) {
-	sites, last := s.recentSitesByClient(cutoff, 1)
+// the file is walked anyway) and the encrypted-DNS flag from the same walk. It
+// is the limit=1 case of recentSitesByClient.
+func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[string]time.Time, map[string]bool) {
+	sites, last, encDNS := s.recentSitesByClient(cutoff, 1)
 	res := make(map[string]string, len(sites))
 	for name, list := range sites {
 		if len(list) > 0 {
 			res[name] = list[0]
 		}
 	}
-	return res, last
+	return res, last, encDNS
 }
 
 // lastDNSByClient reverse-scans dns.jsonl within the window for each client's
@@ -1606,6 +1646,25 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	if dbOK {
 		verdict = classify(series, from.Unix()/60, down+up, cats, devKind, lastTLS, lastDNS, to, loggerOK)
 	}
+	// Encrypted-DNS evidence: flows to the DoT/DoQ port in the window (the
+	// per-target aggregates are already loaded here — the board endpoints only
+	// have the cheaper SNI-based signal), or a known resolver SNI / port-853
+	// handshake within the window slice of the recent-TLS list.
+	encryptedDNS := false
+	for _, a := range aggList {
+		if a.Port == 853 {
+			encryptedDNS = true
+			break
+		}
+	}
+	for _, rec := range recentTLS {
+		if encryptedDNS {
+			break
+		}
+		if !rec.TS.Before(from) && tlsRecordSuggestsEncryptedDNS(rec) {
+			encryptedDNS = true
+		}
+	}
 	writeJSON(w, map[string]any{
 		"name":   name,
 		"since":  to.Sub(from).Round(time.Minute).String(),
@@ -1625,12 +1684,13 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		"minutes":     s.minuteRibbon(db, name, from, to),
 		"recent_dns":  recentDNS,
 		"recent_tls":  recentTLS,
-		"day":         s.dayTimeline(db, name),
-		"device_kind": devKind,
-		"person":      s.aliases.Person(name),
-		"logger_ok":   loggerOK,
-		"db_ok":       dbOK,
-		"verdict":     verdict,
+		"day":           s.dayTimeline(db, name),
+		"device_kind":   devKind,
+		"person":        s.aliases.Person(name),
+		"encrypted_dns": encryptedDNS,
+		"logger_ok":     loggerOK,
+		"db_ok":         dbOK,
+		"verdict":       verdict,
 	})
 }
 

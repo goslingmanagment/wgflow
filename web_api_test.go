@@ -260,6 +260,95 @@ func TestDBUnavailableReportsDbOkFalseAndUnknownVerdict(t *testing.T) {
 	}
 }
 
+func TestEncryptedDNSFlag(t *testing.T) {
+	now := time.Now()
+	base := now.Add(-2 * time.Minute).Truncate(time.Minute)
+	rollupPath := webTestRollup(t, []FlowRecord{
+		// alice speaks DoT: a flow to port 853, no captured handshake.
+		{TSEnd: base, Client: "alice", RemoteIP: "1.1.1.1", RemotePort: 853, Proto: "tcp", ClientDownloadBytes: 900, ClientUploadBytes: 300},
+		{TSEnd: base, Client: "alice", RemoteIP: "93.184.216.34", RemotePort: 443, Proto: "tcp", Domain: "example.com", ClientDownloadBytes: 5000},
+		// bob speaks DoH: ordinary 443 flows, evidence lives in tls.jsonl.
+		{TSEnd: base, Client: "bob", RemoteIP: "104.16.132.229", RemotePort: 443, Proto: "tcp", ClientDownloadBytes: 4000},
+		// carol is a plain-DNS client: nothing should be flagged.
+		{TSEnd: base, Client: "carol", RemoteIP: "93.184.216.34", RemotePort: 443, Proto: "tcp", Domain: "example.com", ClientDownloadBytes: 3000},
+		// dave needs some rollup traffic to appear on the board at all; his
+		// encrypted-DNS evidence is the port-853 handshake in tls.jsonl below.
+		{TSEnd: base, Client: "dave", RemoteIP: "9.9.9.9", RemotePort: 443, Proto: "tcp", ClientDownloadBytes: 1500},
+	})
+	logDir := t.TempDir()
+	webTestWriteJSONL(t, logDir, "tls.jsonl",
+		TLSRecord{TS: now.Add(-3 * time.Minute), Client: "bob", RemoteIP: "104.16.132.229", RemotePort: 443, ServerName: "one.one.one.one"},
+		TLSRecord{TS: now.Add(-2 * time.Minute), Client: "carol", RemoteIP: "93.184.216.34", RemotePort: 443, ServerName: "example.com"},
+		// dave: DoT handshake on port 853 with no SNI — the port alone is evidence.
+		TLSRecord{TS: now.Add(-1 * time.Minute), Client: "dave", RemoteIP: "9.9.9.9", RemotePort: 853, ServerName: ""},
+	)
+	srv := &webServer{logDir: logDir, rollupPath: rollupPath}
+	mux := webTestMux(srv)
+
+	get := func(path string, v any) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s = %d (body=%s)", path, rec.Code, rec.Body.String())
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Board: the SNI/port evidence from the tls.jsonl walk.
+	var clientsResp struct {
+		Clients []struct {
+			Name         string `json:"name"`
+			EncryptedDNS bool   `json:"encrypted_dns"`
+		} `json:"clients"`
+	}
+	get("/api/clients?since=15m", &clientsResp)
+	flags := map[string]bool{}
+	for _, c := range clientsResp.Clients {
+		flags[c.Name] = c.EncryptedDNS
+	}
+	if !flags["bob"] {
+		t.Error("bob (DoH SNI) must be flagged on the board")
+	}
+	if !flags["dave"] {
+		t.Error("dave (handshake on port 853) must be flagged on the board")
+	}
+	if flags["carol"] {
+		t.Error("carol (plain TLS to example.com) must not be flagged")
+	}
+
+	// Detail: flow-level port 853 evidence catches alice too.
+	var detail struct {
+		EncryptedDNS bool `json:"encrypted_dns"`
+	}
+	get("/api/clients/alice?since=15m", &detail)
+	if !detail.EncryptedDNS {
+		t.Error("alice detail (flows to port 853 in the window) must be flagged")
+	}
+	get("/api/clients/carol?since=15m", &detail)
+	if detail.EncryptedDNS {
+		t.Error("carol detail must not be flagged")
+	}
+
+	// Snapshot (the Срез source) carries the same per-client flag.
+	var snap struct {
+		Clients []struct {
+			Name         string `json:"name"`
+			EncryptedDNS bool   `json:"encrypted_dns"`
+		} `json:"clients"`
+	}
+	get("/api/snapshot?since=15m", &snap)
+	snapFlags := map[string]bool{}
+	for _, c := range snap.Clients {
+		snapFlags[c.Name] = c.EncryptedDNS
+	}
+	if !snapFlags["bob"] || snapFlags["carol"] {
+		t.Errorf("snapshot flags = %v, want bob=true carol=false", snapFlags)
+	}
+}
+
 func TestDNSErrorsCountedAfterFilters(t *testing.T) {
 	logDir := t.TempDir()
 	now := time.Now()
