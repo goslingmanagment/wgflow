@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"encoding/binary"
 	"testing"
+	"time"
 )
 
 // The parsers below consume raw bytes from untrusted VPN clients; none of
@@ -104,6 +105,69 @@ func FuzzParseQUICSNI(f *testing.F) {
 			return
 		}
 		parseQUICSNI(b)
+		// Run the reassembling variant too so mutated datagrams reach the
+		// CRYPTO segment collection and merge paths.
+		parseQUICSNIAsm(b, newQUICReassembler(), time.Now())
+	})
+}
+
+// FuzzTLSReassembly drives the per-flow reassembler with an arbitrary
+// sequence of three segments, including seq gaps, so the stateful append /
+// reset / cap logic can never panic on hostile input.
+func FuzzTLSReassembly(f *testing.F) {
+	record, _ := testTLSClientHelloPadded("pq.example.com", 1700)
+	f.Add(record[:1420], append([]byte(nil), record[1420:]...), []byte{}, uint32(0))
+	f.Add(record[:600], append([]byte(nil), record[600:1200]...), append([]byte(nil), record[1200:]...), uint32(0))
+	f.Add(record[:1420], []byte{0xff, 0xff, 0xff}, []byte{0x16, 0x03, 0x01}, uint32(7)) // garbage continuation + seq gap
+	f.Add([]byte{0x16, 0x03, 0x01, 0x40, 0x00}, []byte{0x01, 0x00, 0x40}, []byte{}, uint32(0))
+	f.Fuzz(func(t *testing.T, s1, s2, s3 []byte, gap uint32) {
+		if len(s1)+len(s2)+len(s3) > 65535 {
+			return
+		}
+		r := newTLSReassembler()
+		key := tcpFlowKey{clientIP: "10.66.66.2", remoteIP: "192.0.2.1", clientPort: 50000, remotePort: 443}
+		now := time.Now()
+		seq := uint32(1)
+		r.Feed(key, seq, s1, now)
+		seq += uint32(len(s1))
+		r.Feed(key, seq, s2, now)
+		// The third segment lands with a fuzzer-chosen offset to hit both
+		// the in-order append and the mismatch-reset paths.
+		r.Feed(key, seq+uint32(len(s2))+gap%16, s3, now)
+	})
+}
+
+// FuzzQUICCryptoReassembly feeds raw segments with arbitrary offsets straight
+// into the per-DCID merge logic (bypassing decryption, which the fuzzer
+// cannot forge) to exercise sorting, overlap trimming, and cap handling.
+func FuzzQUICCryptoReassembly(f *testing.F) {
+	_, handshake := testTLSClientHelloPadded("pq.quic.example.com", 1700)
+	f.Add(append([]byte(nil), handshake[:900]...), uint32(0), append([]byte(nil), handshake[900:]...), uint32(900))
+	f.Add(append([]byte(nil), handshake[900:]...), uint32(900), append([]byte(nil), handshake[:900]...), uint32(0))
+	f.Add([]byte{0x01, 0x00, 0x00}, uint32(0), []byte{0xff}, uint32(9000))
+	f.Fuzz(func(t *testing.T, d1 []byte, o1 uint32, d2 []byte, o2 uint32) {
+		if len(d1)+len(d2) > 65535 {
+			return
+		}
+		asm := newQUICReassembler()
+		dcid := []byte{0x83, 0x94, 0xc8, 0xf0, 0x3e, 0x51, 0x57, 0x08}
+		now := time.Now()
+		asm.Add(dcid, []quicCryptoSeg{{off: uint64(o1), data: d1}}, now)
+		asm.Add(dcid, []quicCryptoSeg{{off: uint64(o2), data: d2}, {off: uint64(o1) / 2, data: d1}}, now)
+	})
+}
+
+func FuzzParseHTTPHost(f *testing.F) {
+	f.Add([]byte("GET /index.html HTTP/1.1\r\nHost: example.com\r\n\r\n"))
+	f.Add([]byte("POST / HTTP/1.0\r\nAccept: */*\r\nhost: api.example.com:8080\r\n\r\n"))
+	f.Add([]byte("GET / HTTP/1.1\r\nHost: [2001:db8::1]:443\r\n\r\n"))
+	f.Add([]byte("GET / HTTP/1.1\r\nHost:"))
+	f.Add([]byte{0x16, 0x03, 0x01, 0x00, 0x50})
+	f.Fuzz(func(t *testing.T, b []byte) {
+		if len(b) > 65535 {
+			return
+		}
+		parseHTTPHost(b)
 	})
 }
 

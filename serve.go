@@ -320,6 +320,7 @@ func serve(args []string) error {
 							}
 							for _, hintIP := range ans.Hints {
 								cache.Put(clientIP, hintIP, owner, ans.TTL)
+								stats.httpsRRHints.Add(1)
 							}
 						}
 					}
@@ -327,7 +328,10 @@ func serve(args []string) error {
 			}
 			if outbound && pkt.Proto == 6 && pkt.DstPort == 443 && len(pkt.TransportPayload) > 0 {
 				key := tcpFlowKey{clientIP: clientIP, remoteIP: remoteIP, clientPort: pkt.SrcPort, remotePort: pkt.DstPort}
-				if sni, _ := tlsAsm.Feed(key, pkt.TCPSeq, pkt.TransportPayload, time.Now()); sni != "" {
+				if sni, reassembled := tlsAsm.Feed(key, pkt.TCPSeq, pkt.TransportPayload, time.Now()); sni != "" {
+					if reassembled {
+						stats.tlsReassembled.Add(1)
+					}
 					cache.Put(clientIP, remoteIP, sni, 3600)
 					_ = tlsLog.Write(TLSRecord{
 						TS: time.Now(), Interface: cfg.Iface, Client: clientName,
@@ -350,11 +354,15 @@ func serve(args []string) error {
 							ServerName: host, Protocol: "http",
 						})
 						stats.tlsRecords.Add(1)
+						stats.httpHostRecords.Add(1)
 					}
 				}
 			}
 			if outbound && pkt.Proto == 17 && pkt.DstPort == 443 {
-				if sni, _ := parseQUICSNIAsm(pkt.TransportPayload, quicAsm, time.Now()); sni != "" {
+				if sni, reassembled := parseQUICSNIAsm(pkt.TransportPayload, quicAsm, time.Now()); sni != "" {
+					if reassembled {
+						stats.quicReassembled.Add(1)
+					}
 					cache.Put(clientIP, remoteIP, sni, 3600)
 					_ = tlsLog.Write(TLSRecord{
 						TS: time.Now(), Interface: cfg.Iface, Client: clientName,
@@ -407,6 +415,8 @@ func serve(args []string) error {
 			}
 		}
 		stats.rollupPending.Store(uint64(len(pendingRollup)))
+		stats.tlsAsmFlows.Store(uint64(tlsAsm.Size()))
+		stats.quicAsmDCIDs.Store(uint64(quicAsm.Size()))
 		stats.flowRecords.Add(uint64(len(records)))
 		stats.lastFlushRecords.Store(uint64(len(records)))
 		stats.currentFlowKeys.Store(0)
@@ -469,6 +479,8 @@ func serve(args []string) error {
 			tlsAsm.Prune(time.Now())
 			quicAsm.Prune(time.Now())
 			httpDedup.Prune(time.Now())
+			stats.tlsAsmFlows.Store(uint64(tlsAsm.Size()))
+			stats.quicAsmDCIDs.Store(uint64(quicAsm.Size()))
 			_ = stats.Write()
 		case <-pruneTicker.C:
 			runPrune()

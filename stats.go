@@ -25,6 +25,12 @@ type RuntimeStats struct {
 	FlowRecords                uint64    `json:"flow_records"`
 	DNSRecords                 uint64    `json:"dns_records"`
 	TLSRecords                 uint64    `json:"tls_records"`
+	TLSReassembled             uint64    `json:"tls_reassembled"`
+	QUICReassembled            uint64    `json:"quic_reassembled"`
+	HTTPSRRHints               uint64    `json:"https_rr_hints"`
+	HTTPHostRecords            uint64    `json:"http_host_records"`
+	TLSReassemblyFlows         int       `json:"tls_reassembly_flows"`
+	QUICReassemblyDCIDs        int       `json:"quic_reassembly_dcids"`
 	LogWriteErrors             uint64    `json:"log_write_errors"`
 	KernelPacketSocketPackets  uint64    `json:"kernel_packet_socket_packets"`
 	KernelPacketSocketDrops    uint64    `json:"kernel_packet_socket_drops"`
@@ -62,6 +68,12 @@ type StatsCollector struct {
 	flowRecords        atomic.Uint64
 	dnsRecords         atomic.Uint64
 	tlsRecords         atomic.Uint64
+	tlsReassembled     atomic.Uint64
+	quicReassembled    atomic.Uint64
+	httpsRRHints       atomic.Uint64
+	httpHostRecords    atomic.Uint64
+	tlsAsmFlows        atomic.Uint64 // gauge: live TLS reassembly buffers
+	quicAsmDCIDs       atomic.Uint64 // gauge: live QUIC reassembly buffers
 	kernelPackets      atomic.Uint64
 	kernelDrops        atomic.Uint64
 	lastDropsDelta     atomic.Uint64
@@ -152,6 +164,12 @@ func (s *StatsCollector) Snapshot() RuntimeStats {
 		FlowRecords:                s.flowRecords.Load(),
 		DNSRecords:                 s.dnsRecords.Load(),
 		TLSRecords:                 s.tlsRecords.Load(),
+		TLSReassembled:             s.tlsReassembled.Load(),
+		QUICReassembled:            s.quicReassembled.Load(),
+		HTTPSRRHints:               s.httpsRRHints.Load(),
+		HTTPHostRecords:            s.httpHostRecords.Load(),
+		TLSReassemblyFlows:         int(s.tlsAsmFlows.Load()),
+		QUICReassemblyDCIDs:        int(s.quicAsmDCIDs.Load()),
 		LogWriteErrors:             logWriteErrors.Load(),
 		KernelPacketSocketPackets:  s.kernelPackets.Load(),
 		KernelPacketSocketDrops:    s.kernelDrops.Load(),
