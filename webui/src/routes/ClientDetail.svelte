@@ -19,6 +19,34 @@
     return 'нет заметных следов в окне'
   }
 
+  // Collapse a top-target's app-identity and infrastructure layers into one cell:
+  // a primary identity (app hostname, or the bare IP when that's all we have) over
+  // a dim infra/provenance subline. Replaces the old two-column App|Infra split,
+  // which needed more width than the half-page card has and so overflowed/truncated.
+  function targetView(t) {
+    const ident = t.app_target || t.target
+    const identIsIP = !t.app_target && t.is_ip
+    let infra = ''
+    let prov = ''
+    let provTitle = ''
+    if (!t.is_ip) {
+      infra = 'direct'
+    } else {
+      const parts = []
+      if (t.target_org) parts.push(t.target_org)
+      if (t.app_target) parts.push(t.target) // app served from this IP — show where
+      else if (t.resolved_target) parts.push(t.resolved_target)
+      else parts.push(t.proto === 'udp' ? 'QUIC' : 'no PTR')
+      infra = parts.join(' · ')
+      if (t.attribution_source) {
+        const more = t.attribution_candidates?.length > 1 ? ' +' + (t.attribution_candidates.length - 1) : ''
+        prov = t.attribution_source.replace(/^TLS /, '') + more
+        provTitle = t.attribution_source + (more ? ' · ' + t.attribution_candidates.join(', ') : '')
+      }
+    }
+    return { ident, identIsIP, infra, prov, provTitle, title: infra ? `${ident} · ${infra}` : ident }
+  }
+
   let { param } = $props()
   let data = $state(null)
   let err = $state(null)
@@ -124,34 +152,24 @@
       <div class="ch"><h3 class="serif">Top targets</h3><span class="hint mono" title="Wire bytes are ~94–95% of these totals; packet counts are approximate (GSO/GRO coalescing).">~94–95% (GSO/GRO)</span></div>
       <div class="tscroll">
         <table class="t">
-          <thead><tr><th>App</th><th>Infra</th><th>Cat</th><th class="r">Down</th><th class="r">Up</th></tr></thead>
+          <thead><tr><th>Target</th><th class="c-cat">Cat</th><th class="r c-num">Down</th><th class="r c-num">Up</th></tr></thead>
           <tbody>
             {#each data.top_targets.slice(0, 8) as t}
+              {@const v = targetView(t)}
               <tr class:bg={t.category === 'apple'}>
-                <td class="app" title={t.app_target || (!t.is_ip ? t.target : '')}>
-                  <span class="target-main">{t.app_target || (!t.is_ip ? t.target : '—')}</span>
-                  {#if t.attribution_source}
-                    <span class="target-meta">
-                      <span>{t.attribution_source}</span>
-                      {#if t.attribution_candidates?.length > 1}
-                        <span class="org" title={t.attribution_candidates.join(', ')}>+{t.attribution_candidates.length - 1}</span>
-                      {/if}
-                    </span>
-                  {/if}
+                <td class="tgt" title={v.title}>
+                  <div class="ident" class:mono={v.identIsIP}>
+                    <span class="name">{v.ident}</span>
+                    {#if v.prov}<span class="prov" title={v.provTitle}>{v.prov}</span>{/if}
+                  </div>
+                  {#if v.infra}<div class="infra">{v.infra}</div>{/if}
                 </td>
-                <td class="infra" title={t.resolved_target ? `${t.target} · ${t.resolved_target}` : t.target}>
-                  <span class="target-main">{t.is_ip ? t.target : 'direct'}</span>
-                  <span class="target-meta">
-                    {#if t.resolved_target}<span>{t.resolved_target}</span>{:else if t.is_ip}<span>no hostname{t.proto === 'udp' ? ' (QUIC)' : ''}</span>{/if}
-                    {#if t.target_org}<span class="org">{t.target_org}</span>{/if}
-                  </span>
-                </td>
-                <td><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">push/OCSP?</span>{/if}</td>
+                <td class="cat"><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<span class="hedge" title="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven.">?</span>{/if}</td>
                 <td class="r mono">{fmtBytes(t.down)}</td>
                 <td class="r mono">{fmtBytes(t.up)}</td>
               </tr>
             {/each}
-            {#if data.top_targets.length === 0}<tr><td colspan="5" class="empty">No traffic in this window.</td></tr>{/if}
+            {#if data.top_targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
           </tbody>
         </table>
       </div>
@@ -291,48 +309,50 @@
     font-size: 11px;
     margin: -6px 0 14px;
   }
-  .t td.app,
-  .t td.infra {
+  .t td.tgt {
     white-space: normal;
-    overflow: visible;
   }
-  .target-main {
-    display: block;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .target-meta {
+  .ident {
     display: flex;
-    align-items: center;
-    gap: 5px;
-    min-height: 14px;
-    overflow: hidden;
-    color: var(--color-muted);
-    font-size: 10.5px;
-    white-space: nowrap;
+    align-items: baseline;
+    gap: 6px;
+    min-width: 0;
   }
-  .target-meta > span:first-child {
+  .ident .name {
     min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
+    white-space: nowrap;
   }
-  .org {
+  .prov {
+    flex: 0 0 auto;
     color: var(--color-muted);
     border: 1px solid var(--color-border);
     border-radius: 4px;
     padding: 0 4px;
-    font-size: 10px;
-    flex: 0 0 auto;
+    font-size: 9px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+  .infra {
+    margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    color: var(--color-muted);
+    font-size: 10.5px;
   }
   .hedge {
+    margin-left: 5px;
     color: var(--color-muted);
-    margin-left: 7px;
-    font-size: 10px;
+    border: 1px solid var(--color-border);
+    border-radius: 4px;
+    padding: 0 4px;
+    font-size: 9px;
     cursor: help;
   }
-  tr.bg .app,
-  tr.bg .infra {
+  tr.bg .tgt .name,
+  tr.bg .tgt .infra {
     color: var(--color-dim);
   }
   .card {
@@ -365,7 +385,7 @@
     grid-template-columns: 1fr 1fr;
     gap: 14px;
   }
-  @media (max-width: 760px) {
+  @media (max-width: 900px) {
     .two {
       grid-template-columns: 1fr;
     }
@@ -376,7 +396,7 @@
   }
   table.t {
     width: 100%;
-    min-width: 560px;
+    min-width: 0;
     border-collapse: collapse;
     font-size: 12.5px;
     table-layout: fixed;
@@ -389,12 +409,23 @@
     padding: 4px 6px 6px 0;
     border-bottom: 1px solid var(--color-border);
   }
+  /* Fixed layout: these header widths set the columns; Target takes the rest. */
+  .t th.c-cat {
+    width: 88px;
+  }
+  .t th.c-num {
+    width: 82px;
+  }
   .t td {
     padding: 6px 6px 6px 0;
     border-bottom: 1px solid var(--color-border);
+    vertical-align: top;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
+  }
+  .t td.cat {
+    color: var(--color-dim);
   }
   .t tr:last-child td {
     border-bottom: 0;
