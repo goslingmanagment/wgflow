@@ -97,7 +97,7 @@ const SSE_DEAD_MS = 6_000 // ~3 missed 2s stream ticks => web stream is down
 const CAPTURE_STALE_MS = 90_000 // 3x the 30s stats write cadence => logger stalled
 
 export const health = $state({
-  status: 'down', // 'live' | 'stale' | 'down'
+  status: 'down', // 'live' | 'stale' | 'down' | 'unknown' (broken timestamps)
   mbit: null, // current throughput, only when live
   detail: 'ожидание данных…', // human reason, shown on hover and copied into verdicts
   stats: null, // last RuntimeStats payload
@@ -135,15 +135,25 @@ export function refreshHealth() {
     health.detail = `веб-поток прерван ${secs(sseAge)}с назад — данные не обновляются`
     return
   }
-  const updAge = now - new Date(s.updated_at).getTime()
-  const flushAge = now - new Date(s.last_flush_at).getTime()
+  const updMs = new Date(s.updated_at).getTime()
+  const flushMs = new Date(s.last_flush_at).getTime()
+  // A garbled/missing timestamp makes every age comparison below NaN-false,
+  // which used to fall through to "live" — the one verdict it must never fake.
+  if (!isFinite(updMs)) {
+    health.status = 'unknown'
+    health.mbit = null
+    health.detail = 'битая метка времени в stats — свежесть логгера неизвестна'
+    return
+  }
+  const updAge = now - updMs
+  const flushTxt = isFinite(flushMs) ? `флаш ${secs(now - flushMs)}с назад` : 'флаш —'
   if (updAge > CAPTURE_STALE_MS) {
     health.status = 'stale'
     health.mbit = null
-    health.detail = `тишина не подтверждена — логгер не обновлялся ${secs(updAge)}с (флаш ${secs(flushAge)}с назад)`
+    health.detail = `тишина не подтверждена — логгер не обновлялся ${secs(updAge)}с (${flushTxt})`
     return
   }
   health.status = 'live'
   health.mbit = (Number(s.bit_rate_per_second) || 0) / 1e6
-  health.detail = `логгер исправен · обновлён ${secs(updAge)}с назад · флаш ${secs(flushAge)}с назад`
+  health.detail = `логгер исправен · обновлён ${secs(updAge)}с назад · ${flushTxt}`
 }

@@ -28,6 +28,11 @@
 
 {#if res.err && !res.data}
   <p class="err">Couldn't load overview. ({res.err})</p>
+{:else if !res.data}
+  <!-- Never render zero KPIs before the first response: "0.0 Mbit/s" would read
+       as measured silence, and zero ≠ proven quiet. -->
+  <h1 class="serif">Overview</h1>
+  <p class="dim">Loading…</p>
 {:else}
   <h1 class="serif">Overview</h1>
   {#if res.stale}
@@ -41,7 +46,7 @@
     <div class="kpi"><div class="k">Packets/s</div><div class="v mono">{fmtShort(st.packet_rate_per_second || 0)}</div><div class="s">avg {fmtShort(st.average_packet_rate_per_second || 0)}</div></div>
     <div class="kpi"><div class="k">Clients</div><div class="v mono">{clients?.clients?.length ?? 0}</div><div class="s">of {st.client_count ?? 0}</div></div>
     <div class="kpi"><div class="k">Match rate</div><div class="v mono">{matchRate}%</div><div class="s">{fmtShort(st.packet_matched || 0)} matched</div></div>
-    <div class="kpi"><div class="k">Kernel drops</div><div class="v mono" style="color:{st.kernel_packet_socket_drops ? 'var(--color-warn)' : 'var(--color-ok)'}">{fmtShort(st.kernel_packet_socket_drops || 0)}</div><div class="s" style="color:var(--color-ok)">Δ {st.last_kernel_drops_delta ?? 0}</div></div>
+    <div class="kpi"><div class="k">Kernel drops</div><div class="v mono" style="color:{st.kernel_packet_socket_drops ? 'var(--color-warn)' : 'var(--color-ok)'}">{fmtShort(st.kernel_packet_socket_drops || 0)}</div><div class="s" style="color:{st.last_kernel_drops_delta ? 'var(--color-warn)' : 'var(--color-ok)'}">Δ {st.last_kernel_drops_delta ?? 0}</div></div>
   </div>
 
   <div class="card">
@@ -186,6 +191,9 @@
   }
   .err {
     color: var(--color-danger);
+  }
+  .dim {
+    color: var(--color-muted);
   }
   .outage {
     background: color-mix(in srgb, var(--color-warn) 16%, transparent);

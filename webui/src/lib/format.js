@@ -74,7 +74,10 @@ export function sinceSeconds(s) {
 }
 
 export function ago(ts) {
-  const d = (Date.now() - new Date(ts).getTime()) / 1000
+  const ms = new Date(ts).getTime()
+  // A missing/garbled timestamp must read as "unknown", not "NaNd".
+  if (!isFinite(ms)) return '—'
+  const d = (Date.now() - ms) / 1000
   if (d < 0) return 'now'
   if (d < 5) return 'now'
   if (d < 60) return Math.floor(d) + 's'

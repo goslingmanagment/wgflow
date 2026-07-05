@@ -1,11 +1,17 @@
 <script>
   import { fmtBytes, catColor, hourMSK } from './format.js'
+  import { refresh } from './store.svelte.js'
   let { day = [] } = $props()
 
   const max = $derived(Math.max(1, ...day.map((h) => Number(h.total) || 0)))
   const total = $derived(day.reduce((s, h) => s + (Number(h.total) || 0), 0))
-  // Buckets are MSK hours (server-side); the "now" marker must match.
-  const nowHour = hourMSK()
+  // Buckets are MSK hours (server-side); the "now" marker must match. Recomputed
+  // on the shared refresh tick, so a tab left open overnight doesn't keep
+  // highlighting yesterday evening's hour.
+  const nowHour = $derived.by(() => {
+    refresh.tick
+    return hourMSK()
+  })
   let hover = $state(-1)
 
   function segs(h) {
@@ -35,9 +41,11 @@
         class="col"
         class:now={h.hour === nowHour}
         class:active={h.hour === hover}
+        class:future={h.hour > nowHour}
         onmouseenter={() => (hover = h.hour)}
         onfocus={() => (hover = h.hour)}
-        aria-label="{String(h.hour).padStart(2, '0')}:00, {fmtBytes(h.total)}"
+        onblur={() => (hover = -1)}
+        aria-label="{String(h.hour).padStart(2, '0')}:00, {h.hour > nowHour ? 'not yet' : fmtBytes(h.total)}"
       >
         <span class="bar" style="height:{h.total > 0 ? Math.max(2, (h.total / max) * 100) : 0}%">
           {#each segs(h) as s}
@@ -50,11 +58,11 @@
     {#if hover >= 0 && day[hover]}
       <div class="tip" class:left={hover >= 12}>
         <div class="th">{String(hover).padStart(2, '0')}:00 – {String(hover).padStart(2, '0')}:59 МСК</div>
-        <div class="tt">{fmtBytes(day[hover].total)}</div>
+        <div class="tt">{hover > nowHour ? '—' : fmtBytes(day[hover].total)}</div>
         {#each segs(day[hover]) as s}
           <div class="tr"><span class="dot" style="background:{catColor(s.category)}"></span>{s.category}<b>{fmtBytes(s.bytes)}</b></div>
         {/each}
-        {#if day[hover].total === 0}<div class="quiet">no traffic this hour</div>{/if}
+        {#if hover > nowHour}<div class="quiet">hasn't happened yet</div>{:else if day[hover].total === 0}<div class="quiet">no traffic this hour</div>{/if}
       </div>
     {/if}
   </div>
@@ -122,6 +130,11 @@
   }
   .col.now {
     background: color-mix(in srgb, var(--color-coral) 12%, transparent);
+  }
+  /* The day runs from MSK midnight, so hours after the current one are simply
+     "not yet" — hatch them so they can't be misread as measured silence. */
+  .col.future {
+    background: repeating-linear-gradient(-45deg, transparent 0 4px, rgba(255, 255, 255, 0.045) 4px 8px);
   }
   .col.now::before {
     content: '';

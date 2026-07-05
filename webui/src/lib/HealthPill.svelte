@@ -3,8 +3,8 @@
   // The single status chip used everywhere. Color + label are driven by the
   // shared logger-health verdict, so no screen can show a hardcoded green dot.
   let { rate = false } = $props()
-  const CLS = { live: 'ok', stale: 'warn', down: 'down' }
-  const LABEL = { live: 'live', stale: 'stale', down: 'offline' }
+  const CLS = { live: 'ok', stale: 'warn', down: 'down', unknown: 'warn' }
+  const LABEL = { live: 'live', stale: 'stale', down: 'offline', unknown: 'unknown' }
 </script>
 
 <span class="hp {CLS[health.status] || 'down'}" title={health.detail}>
