@@ -1,18 +1,20 @@
 <script>
-  import { setAutoRefresh, ui } from './store.svelte.js'
+  import { refresh, setAutoRefresh, ui } from './store.svelte.js'
   import Icon from './Icon.svelte'
+
+  const cadence = $derived(Math.round(refresh.intervalMs / 1000) + 's')
 </script>
 
 <button
   class="auto"
   class:on={ui.autoRefresh}
-  title={ui.autoRefresh ? 'Автообновление включено' : 'Автообновление выключено'}
+  title={ui.autoRefresh ? `Автообновление каждые ${cadence}` : 'Автообновление выключено'}
   aria-label={ui.autoRefresh ? 'Выключить автообновление' : 'Включить автообновление'}
   aria-pressed={ui.autoRefresh}
   onclick={() => setAutoRefresh(!ui.autoRefresh)}
 >
   <Icon name="refresh" size={15} />
-  <span>{ui.autoRefresh ? '5s' : 'off'}</span>
+  <span>{ui.autoRefresh ? cadence : 'off'}</span>
 </button>
 
 <style>

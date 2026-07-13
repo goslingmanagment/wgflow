@@ -45,7 +45,9 @@ function writePrefs() {
 }
 
 export const ui = $state(readPrefs())
-export const refresh = $state({ tick: 0, intervalMs: 5_000, lastAt: Date.now() })
+// The rollup only advances about every 30 seconds. Polling faster repeats the
+// same generation and needlessly competes with the JSONL/rollup scans it starts.
+export const refresh = $state({ tick: 0, intervalMs: 30_000, lastAt: Date.now() })
 
 export function setSince(s) {
   const next = validSince(s)

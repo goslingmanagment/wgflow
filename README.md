@@ -9,10 +9,11 @@ metadata.
 ## Commands
 
 ```sh
-wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow
+wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow --rollup-retention 31d --rollup-detail-retention 7d
 wgflow top --since 5m --client diana-iphone --log-dir /var/log/wgflow
 wgflow report --since 24h --log-dir /var/log/wgflow
 wgflow rollup-import --since 24h
+wgflow rollup-prune --keep 31d --detail-keep 7d
 wgflow stats --log-dir /var/log/wgflow --json
 wgflow web --listen :8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db
 ```
@@ -22,7 +23,7 @@ wgflow web --listen :8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rol
 The included `wgflow.service` runs:
 
 ```sh
-/usr/local/bin/wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db --flush 30s
+/usr/local/bin/wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db --flush 30s --rollup-retention 31d --rollup-detail-retention 7d
 ```
 
 Install example:
@@ -40,6 +41,15 @@ sudo systemctl enable --now wgflow-web
 
 The web UI is embedded in the binary (`webui/dist` is committed), so `go build`
 alone produces a self-contained binary — Node is only needed to rebuild the UI.
+
+Rollup retention is tiered. Compact per-client/category summaries retain the
+30-day report window (`--rollup-retention 31d`), while the much larger
+per-target detail bucket can use a shorter window (`--rollup-detail-retention
+7d`). If the detail flag is omitted it inherits `--rollup-retention`, preserving
+the original single-window behavior. Pruning releases bbolt pages for reuse but
+does not shrink the database file; offline compaction is a separate operation.
+Detail-backed web endpoints are capped at seven days; 30-day reports use the
+compact summary tier and remain complete.
 
 ## Web panel
 

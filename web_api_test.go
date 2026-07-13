@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -59,6 +61,9 @@ func TestQueryWindowAndLimitClamps(t *testing.T) {
 	if d := parseSince(mk("since=5m"), 15*time.Minute); d != 5*time.Minute {
 		t.Errorf("parseSince 5m = %v", d)
 	}
+	if d := parseDetailSince(mk("since=720h"), 15*time.Minute); d != maxDetailQueryWindow {
+		t.Errorf("parseDetailSince 30d = %v, want %v", d, maxDetailQueryWindow)
+	}
 
 	// ?from=1 is the OOM vector: the window must be clamped keeping the to end.
 	from, to, ok := parseRange(mk("from=1"))
@@ -67,6 +72,10 @@ func TestQueryWindowAndLimitClamps(t *testing.T) {
 	}
 	if got := to.Sub(from); got != maxQueryWindow {
 		t.Errorf("parseRange window = %v, want %v", got, maxQueryWindow)
+	}
+	from, to, ok = parseRangeMax(mk("from=1"), maxDetailQueryWindow)
+	if !ok || to.Sub(from) != maxDetailQueryWindow {
+		t.Errorf("detail parseRange = (%v, %v, %v), want a %v window", from, to, ok, maxDetailQueryWindow)
 	}
 
 	if n := atoiDefault("999999", 50); n != maxLimitParam {
@@ -483,5 +492,99 @@ func TestEachLineReverseCapsRunawayLines(t *testing.T) {
 	// fail to unmarshal them and move on.
 	if maxLine >= 2<<20 {
 		t.Errorf("max delivered line = %d bytes; carry cap failed", maxLine)
+	}
+}
+
+func TestEachLineReverseContextStopsAfterCancellation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	if err := os.WriteFile(path, []byte("one\ntwo\nthree\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	seen := 0
+	err := eachLineReverseContext(ctx, path, func([]byte) bool {
+		seen++
+		cancel()
+		return true
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("eachLineReverseContext error = %v, want context.Canceled", err)
+	}
+	if seen != 1 {
+		t.Fatalf("callback count = %d, want 1", seen)
+	}
+}
+
+func TestClientDetailRollupReadsOnlyRequestedClient(t *testing.T) {
+	base := time.Now().Add(-4 * time.Minute).Truncate(time.Minute)
+	path := webTestRollup(t, []FlowRecord{
+		{TSEnd: base, Client: "alice", RemoteIP: "93.184.216.34", RemotePort: 443, Proto: "tcp", Domain: "example.com", ClientDownloadBytes: 100, ClientUploadBytes: 20},
+		{TSEnd: base.Add(2 * time.Minute), Client: "alice", RemoteIP: "1.1.1.1", RemotePort: 53, Proto: "udp", Domain: "cloudflare-dns.com", ClientDownloadBytes: 300, ClientUploadBytes: 40},
+		{TSEnd: base, Client: "bob", RemoteIP: "9.9.9.9", RemotePort: 443, Proto: "tcp", Domain: "quad9.net", ClientDownloadBytes: 9_000_000, ClientUploadBytes: 8_000_000},
+		{TSEnd: base.Add(time.Minute), Client: "bob", RemoteIP: "8.8.8.8", RemotePort: 443, Proto: "tcp", Domain: "google.com", ClientDownloadBytes: 7_000_000},
+	})
+	db, err := openRollupReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	srv := &webServer{}
+
+	aggs, err := srv.clientFlowsWindow(context.Background(), db, "alice", base, base.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aggs) != 2 {
+		t.Fatalf("alice aggregates = %d, want 2: %#v", len(aggs), aggs)
+	}
+	var total uint64
+	for _, agg := range aggs {
+		if agg.Client != "alice" {
+			t.Fatalf("aggregate leaked client %q", agg.Client)
+		}
+		total += agg.Down + agg.Up
+	}
+	if total != 460 {
+		t.Fatalf("alice aggregate total = %d, want 460", total)
+	}
+
+	series, hasRows, err := srv.clientSeriesWindow(context.Background(), db, "alice", base, base.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasRows {
+		t.Fatal("clientSeriesWindow reported no Alice rows")
+	}
+	want := []uint64{120, 0, 340}
+	if len(series) != len(want) {
+		t.Fatalf("series length = %d, want %d", len(series), len(want))
+	}
+	for i := range want {
+		if series[i] != want[i] {
+			t.Errorf("series[%d] = %d, want %d", i, series[i], want[i])
+		}
+	}
+}
+
+func TestClientDetailRollupReadsHonorCanceledContext(t *testing.T) {
+	base := time.Now().Add(-time.Minute).Truncate(time.Minute)
+	path := webTestRollup(t, []FlowRecord{{
+		TSEnd: base, Client: "alice", RemoteIP: "93.184.216.34", RemotePort: 443,
+		Proto: "tcp", Domain: "example.com", ClientDownloadBytes: 100,
+	}})
+	db, err := openRollupReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := (&webServer{}).clientFlowsWindow(ctx, db, "alice", base, base); !errors.Is(err, context.Canceled) {
+		t.Fatalf("clientFlowsWindow error = %v, want context.Canceled", err)
+	}
+	if _, _, err := (&webServer{}).clientSeriesWindow(ctx, db, "alice", base, base); !errors.Is(err, context.Canceled) {
+		t.Fatalf("clientSeriesWindow error = %v, want context.Canceled", err)
 	}
 }

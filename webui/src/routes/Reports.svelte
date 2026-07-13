@@ -14,7 +14,7 @@
   let since = $state('24h')
   const res = createResource()
 
-  // Deliberately NOT tied to the 5s refresh tick: /api/report joins the whole
+  // Deliberately NOT tied to the shared refresh tick: /api/report joins the whole
   // rollup window (up to 30d), the heaviest endpoint we have. Load on mount and
   // when the window changes only.
   $effect(() => {

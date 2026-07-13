@@ -104,7 +104,8 @@ func serve(args []string) error {
 	fs.StringVar(&cfg.LogDir, "log-dir", "/var/log/wgflow", "log directory")
 	fs.StringVar(&cfg.RollupPath, "rollup", "/var/lib/wgflow/rollup.db", "rollup DB path")
 	fs.DurationVar(&cfg.FlushInterval, "flush", 30*time.Second, "flow flush interval")
-	retentionStr := fs.String("rollup-retention", "0", "delete rollup minute buckets older than this, e.g. 90d (0 = keep forever)")
+	retentionStr := fs.String("rollup-retention", "0", "retain compact rollup summaries for this long, e.g. 31d (0 = keep forever)")
+	detailRetentionStr := fs.String("rollup-detail-retention", "", "retain per-target rollup detail for this long, e.g. 7d (default: same as --rollup-retention)")
 	var cidrList multiFlag
 	cidrList = append(cidrList, "10.66.66.0/24", "fd42:42:42::/64")
 	fs.Var(&cidrList, "vpn-cidr", "VPN client CIDR; can be repeated")
@@ -116,7 +117,27 @@ func serve(args []string) error {
 	if err != nil {
 		return fmt.Errorf("--rollup-retention: %w", err)
 	}
+	if retention < 0 {
+		return fmt.Errorf("--rollup-retention must not be negative")
+	}
 	cfg.RollupRetention = retention
+	if strings.TrimSpace(*detailRetentionStr) == "" {
+		// Preserve the original one-tier behavior unless the operator explicitly
+		// opts into a shorter per-target detail window.
+		cfg.RollupDetailRetention = retention
+	} else {
+		detailRetention, err := parseRetention(*detailRetentionStr)
+		if err != nil {
+			return fmt.Errorf("--rollup-detail-retention: %w", err)
+		}
+		if detailRetention < 0 {
+			return fmt.Errorf("--rollup-detail-retention must not be negative")
+		}
+		cfg.RollupDetailRetention = detailRetention
+	}
+	if cfg.RollupRetention > 0 && (cfg.RollupDetailRetention == 0 || cfg.RollupDetailRetention > cfg.RollupRetention) {
+		return fmt.Errorf("--rollup-detail-retention must be positive and no longer than --rollup-retention")
+	}
 
 	if err := os.MkdirAll(cfg.LogDir, 0755); err != nil {
 		return err
@@ -216,7 +237,7 @@ func serve(args []string) error {
 	// flush-path openings, which already retry via pendingRollup.
 	var pruneRunning atomic.Bool
 	runPrune := func() {
-		if cfg.RollupRetention <= 0 {
+		if cfg.RollupRetention <= 0 && cfg.RollupDetailRetention <= 0 {
 			return
 		}
 		if !pruneRunning.CompareAndSwap(false, true) {
@@ -224,10 +245,20 @@ func serve(args []string) error {
 		}
 		go func() {
 			defer pruneRunning.Store(false)
-			if n, err := pruneRollup(cfg.RollupPath, time.Now().Add(-cfg.RollupRetention)); err != nil {
+			now := time.Now()
+			var summaryCutoff, detailCutoff time.Time
+			if cfg.RollupRetention > 0 {
+				summaryCutoff = now.Add(-cfg.RollupRetention)
+			}
+			if cfg.RollupDetailRetention > 0 {
+				detailCutoff = now.Add(-cfg.RollupDetailRetention)
+			}
+			detailDeleted, summaryDeleted, err := pruneRollupTiers(cfg.RollupPath, summaryCutoff, detailCutoff)
+			if err != nil {
 				log.Printf("rollup prune failed: %v", err)
-			} else if n > 0 {
-				log.Printf("rollup prune: deleted %d keys older than %s", n, cfg.RollupRetention)
+			} else if detailDeleted+summaryDeleted > 0 {
+				log.Printf("rollup prune: deleted detail=%d summary=%d (detail retention=%s, summary retention=%s)",
+					detailDeleted, summaryDeleted, cfg.RollupDetailRetention, cfg.RollupRetention)
 			}
 		}()
 	}

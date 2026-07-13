@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -43,46 +44,73 @@ type TopAgg struct {
 	Up, Down, UpP, DownP            uint64
 }
 
-// pruneRollup deletes every minute bucket older than cutoff across all four
-// rollup buckets. The three minute-prefixed buckets are key-sorted by minute so
-// we stop at the cutoff; the client-category bucket (client\tminute\tcat) is not,
-// so it is full-scanned. bbolt reuses the freed pages, so the file stops growing
-// (it does not shrink on disk without a separate compaction).
+// Read endpoints should fail fast while a writer/prune owns the bbolt flock.
+// Waiting longer keeps canceled HTTP work alive and lets replacement requests
+// pile up; the next UI refresh can retry once the exclusive operation is done.
+const rollupReadOnlyTimeout = time.Second
+
+// pruneRollup preserves the original single-retention API. New callers should
+// use pruneRollupTiers to keep compact summaries longer than per-target detail.
 func pruneRollup(path string, cutoff time.Time) (int, error) {
-	cutoffMinute := cutoff.Unix() / 60
+	detail, summary, err := pruneRollupTiers(path, cutoff, cutoff)
+	return detail + summary, err
+}
+
+// pruneRollupTiers applies independent retention cutoffs to the large
+// per-target bucket and the three compact summary buckets. A zero cutoff keeps
+// that tier forever. The minute-prefixed buckets are key-sorted by minute, so
+// scans stop at the cutoff; flow_client_category_minute_v1 is client-first and
+// must be scanned in full. Cursor deletion avoids copying every expired key
+// into RAM. bbolt reuses freed pages but does not shrink the file on disk.
+func pruneRollupTiers(path string, summaryCutoff, detailCutoff time.Time) (detailDeleted, summaryDeleted int, err error) {
+	if summaryCutoff.IsZero() && detailCutoff.IsZero() {
+		return 0, 0, nil
+	}
 	db, err := bolt.Open(path, 0644, &bolt.Options{Timeout: 30 * time.Second})
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer db.Close()
-	deleted := 0
-	err = db.Update(func(tx *bolt.Tx) error {
-		for _, name := range [][]byte{rollupBucket, rollupClientBucket, rollupCategoryBucket} {
-			b := tx.Bucket(name)
-			if b == nil {
+	deleteMinutePrefixed := func(tx *bolt.Tx, bucket []byte, cutoff time.Time, count *int) error {
+		if cutoff.IsZero() {
+			return nil
+		}
+		b := tx.Bucket(bucket)
+		if b == nil {
+			return nil
+		}
+		cutoffMinute := cutoff.Unix() / 60
+		c := b.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			m := minutePrefix(k)
+			if m < 0 {
 				continue
 			}
-			var del [][]byte
-			c := b.Cursor()
-			for k, _ := c.First(); k != nil; k, _ = c.Next() {
-				m := minutePrefix(k)
-				if m < 0 {
-					continue
-				}
-				if m >= cutoffMinute {
-					break // keys are sorted by minute
-				}
-				del = append(del, append([]byte(nil), k...))
+			if m >= cutoffMinute {
+				break
 			}
-			for _, k := range del {
-				if err := b.Delete(k); err != nil {
-					return err
-				}
-				deleted++
+			if err := c.Delete(); err != nil {
+				return err
+			}
+			(*count)++
+		}
+		return nil
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		if err := deleteMinutePrefixed(tx, rollupBucket, detailCutoff, &detailDeleted); err != nil {
+			return err
+		}
+		for _, name := range [][]byte{rollupClientBucket, rollupCategoryBucket} {
+			if err := deleteMinutePrefixed(tx, name, summaryCutoff, &summaryDeleted); err != nil {
+				return err
 			}
 		}
-		if b := tx.Bucket(rollupClientCategoryBucket); b != nil {
-			var del [][]byte
+		if !summaryCutoff.IsZero() {
+			b := tx.Bucket(rollupClientCategoryBucket)
+			if b == nil {
+				return nil
+			}
+			cutoffMinute := summaryCutoff.Unix() / 60
 			c := b.Cursor()
 			for k, _ := c.First(); k != nil; k, _ = c.Next() {
 				parts := strings.SplitN(string(k), "\t", 3)
@@ -90,19 +118,16 @@ func pruneRollup(path string, cutoff time.Time) (int, error) {
 					continue
 				}
 				if m, err := strconv.ParseInt(parts[1], 10, 64); err == nil && m < cutoffMinute {
-					del = append(del, append([]byte(nil), k...))
+					if err := c.Delete(); err != nil {
+						return err
+					}
+					summaryDeleted++
 				}
-			}
-			for _, k := range del {
-				if err := b.Delete(k); err != nil {
-					return err
-				}
-				deleted++
 			}
 		}
 		return nil
 	})
-	return deleted, err
+	return detailDeleted, summaryDeleted, err
 }
 
 // minutePrefix parses the leading zero-padded minute from a rollup key, or -1.
@@ -348,9 +373,16 @@ func decodeRollupTotalValue(b []byte) RollupTotal {
 }
 
 func aggregateReportTotalsFromRollup(path string, cutoff time.Time) (map[string]*TopAgg, map[string]*TopAgg, int, error) {
+	return aggregateReportTotalsFromRollupContext(context.Background(), path, cutoff)
+}
+
+func aggregateReportTotalsFromRollupContext(ctx context.Context, path string, cutoff time.Time) (map[string]*TopAgg, map[string]*TopAgg, int, error) {
 	byClient := map[string]*TopAgg{}
 	byCategory := map[string]*TopAgg{}
-	db, err := bolt.Open(path, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err := ctx.Err(); err != nil {
+		return byClient, byCategory, 0, err
+	}
+	db, err := bolt.Open(path, 0444, &bolt.Options{ReadOnly: true, Timeout: rollupReadOnlyTimeout})
 	if err != nil {
 		return byClient, byCategory, 0, err
 	}
@@ -358,22 +390,41 @@ func aggregateReportTotalsFromRollup(path string, cutoff time.Time) (map[string]
 	cutoffMinute := cutoff.Unix() / 60
 	count := 0
 	err = db.View(func(tx *bolt.Tx) error {
-		count += readRollupTotalBucket(tx, rollupClientBucket, cutoffMinute, byClient, true)
-		count += readRollupTotalBucket(tx, rollupCategoryBucket, cutoffMinute, byCategory, false)
+		n, err := readRollupTotalBucketContext(ctx, tx, rollupClientBucket, cutoffMinute, byClient, true)
+		count += n
+		if err != nil {
+			return err
+		}
+		n, err = readRollupTotalBucketContext(ctx, tx, rollupCategoryBucket, cutoffMinute, byCategory, false)
+		count += n
+		if err != nil {
+			return err
+		}
 		return nil
 	})
 	return byClient, byCategory, count, err
 }
 
 func readRollupTotalBucket(tx *bolt.Tx, bucket []byte, cutoffMinute int64, dst map[string]*TopAgg, client bool) int {
+	n, _ := readRollupTotalBucketContext(context.Background(), tx, bucket, cutoffMinute, dst, client)
+	return n
+}
+
+func readRollupTotalBucketContext(ctx context.Context, tx *bolt.Tx, bucket []byte, cutoffMinute int64, dst map[string]*TopAgg, client bool) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	b := tx.Bucket(bucket)
 	if b == nil {
-		return 0
+		return 0, nil
 	}
 	count := 0
 	start := []byte(fmt.Sprintf("%012d", cutoffMinute))
 	c := b.Cursor()
 	for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+		if err := ctx.Err(); err != nil {
+			return count, err
+		}
 		parts := strings.SplitN(string(k), "\t", 2)
 		if len(parts) != 2 {
 			continue
@@ -400,11 +451,18 @@ func readRollupTotalBucket(tx *bolt.Tx, bucket []byte, cutoffMinute int64, dst m
 		a.UpP += total.UploadPackets
 		count++
 	}
-	return count
+	return count, nil
 }
 
 func aggregateFromRollup(path string, cutoff time.Time, clientFilter string, aggs map[string]*TopAgg) (int, error) {
-	db, err := bolt.Open(path, 0444, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	return aggregateFromRollupContext(context.Background(), path, cutoff, clientFilter, aggs)
+}
+
+func aggregateFromRollupContext(ctx context.Context, path string, cutoff time.Time, clientFilter string, aggs map[string]*TopAgg) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	db, err := bolt.Open(path, 0444, &bolt.Options{ReadOnly: true, Timeout: rollupReadOnlyTimeout})
 	if err != nil {
 		return 0, err
 	}
@@ -419,6 +477,9 @@ func aggregateFromRollup(path string, cutoff time.Time, clientFilter string, agg
 		start := []byte(fmt.Sprintf("%012d", cutoffMinute))
 		c := b.Cursor()
 		for k, v := c.Seek(start); k != nil; k, v = c.Next() {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
 			var row RollupRow
 			if json.Unmarshal(v, &row) != nil {
 				continue

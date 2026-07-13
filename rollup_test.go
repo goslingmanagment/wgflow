@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"path/filepath"
 	"strconv"
 	"testing"
@@ -75,5 +77,73 @@ func TestPruneRollup(t *testing.T) {
 	// Idempotent: nothing left older than the cutoff.
 	if n2, err := pruneRollup(path, time.Now().Add(-30*24*time.Hour)); err != nil || n2 != 0 {
 		t.Fatalf("second prune = %d (err %v), want 0", n2, err)
+	}
+}
+
+func TestPruneRollupTiersKeepsCompactHistoryLonger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollup.db")
+	rollup, err := OpenRollup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollup.Close()
+
+	now := time.Now().Truncate(time.Minute)
+	recs := []FlowRecord{
+		{TSEnd: now.Add(-40 * 24 * time.Hour), Client: "alice", RemoteIP: "1.1.1.1", RemotePort: 443, Proto: "tcp", ClientDownloadBytes: 1000},
+		{TSEnd: now.Add(-10 * 24 * time.Hour), Client: "alice", RemoteIP: "8.8.8.8", RemotePort: 443, Proto: "tcp", ClientDownloadBytes: 2000},
+		{TSEnd: now.Add(-1 * time.Hour), Client: "alice", RemoteIP: "9.9.9.9", RemotePort: 443, Proto: "tcp", ClientDownloadBytes: 4000},
+	}
+	if err := rollup.Add(recs); err != nil {
+		t.Fatal(err)
+	}
+
+	detailDeleted, summaryDeleted, err := pruneRollupTiers(
+		path,
+		now.Add(-31*24*time.Hour),
+		now.Add(-7*24*time.Hour),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if detailDeleted != 2 {
+		t.Fatalf("detail deleted=%d, want 2", detailDeleted)
+	}
+	if summaryDeleted != 3 {
+		t.Fatalf("summary deleted=%d, want 3 (old client/category/client-category keys)", summaryDeleted)
+	}
+
+	byClient, _, _, err := aggregateReportTotalsFromRollup(path, now.Add(-90*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := byClient["alice"].Down; got != 6000 {
+		t.Fatalf("compact summary download=%d, want 6000 (10d + recent)", got)
+	}
+
+	details := map[string]*TopAgg{}
+	if _, err := aggregateFromRollup(path, now.Add(-90*24*time.Hour), "alice", details); err != nil {
+		t.Fatal(err)
+	}
+	var detailDown uint64
+	for _, a := range details {
+		detailDown += a.Down
+	}
+	if detailDown != 4000 {
+		t.Fatalf("per-target detail download=%d, want only recent 4000", detailDown)
+	}
+}
+
+func TestRollupAggregatesHonorCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	path := filepath.Join(t.TempDir(), "rollup.db")
+	cutoff := time.Now().Add(-time.Hour)
+
+	if _, err := aggregateFromRollupContext(ctx, path, cutoff, "", map[string]*TopAgg{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("aggregateFromRollupContext error=%v, want context.Canceled", err)
+	}
+	if _, _, _, err := aggregateReportTotalsFromRollupContext(ctx, path, cutoff); !errors.Is(err, context.Canceled) {
+		t.Fatalf("aggregateReportTotalsFromRollupContext error=%v, want context.Canceled", err)
 	}
 }

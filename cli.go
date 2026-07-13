@@ -209,7 +209,8 @@ func parseRetention(s string) (time.Duration, error) {
 func rollupPrune(args []string) error {
 	fs := flag.NewFlagSet("rollup-prune", flag.ExitOnError)
 	rollupPath := fs.String("rollup", "/var/lib/wgflow/rollup.db", "rollup DB path")
-	keepStr := fs.String("keep", "30d", "retention window (e.g. 30d, 12w, 720h); minute buckets older than this are deleted")
+	keepStr := fs.String("keep", "31d", "compact-summary retention window (e.g. 31d, 12w, 744h)")
+	detailKeepStr := fs.String("detail-keep", "", "per-target detail retention window (default: same as --keep)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -220,12 +221,29 @@ func rollupPrune(args []string) error {
 	if keep <= 0 {
 		return fmt.Errorf("--keep must be positive")
 	}
-	cutoff := time.Now().Add(-keep)
-	n, err := pruneRollup(*rollupPath, cutoff)
+	detailKeep := keep
+	if strings.TrimSpace(*detailKeepStr) != "" {
+		detailKeep, err = parseRetention(*detailKeepStr)
+		if err != nil {
+			return fmt.Errorf("--detail-keep: %w", err)
+		}
+		if detailKeep <= 0 {
+			return fmt.Errorf("--detail-keep must be positive")
+		}
+	}
+	if detailKeep > keep {
+		return fmt.Errorf("--detail-keep must not exceed --keep")
+	}
+	now := time.Now()
+	summaryCutoff := now.Add(-keep)
+	detailCutoff := now.Add(-detailKeep)
+	detailDeleted, summaryDeleted, err := pruneRollupTiers(*rollupPath, summaryCutoff, detailCutoff)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("pruned_keys=%d rollup=%s keep=%s cutoff=%s\n", n, *rollupPath, keep, cutoff.Format(time.RFC3339))
+	fmt.Printf("pruned_detail_keys=%d pruned_summary_keys=%d rollup=%s detail_keep=%s summary_keep=%s detail_cutoff=%s summary_cutoff=%s\n",
+		detailDeleted, summaryDeleted, *rollupPath, detailKeep, keep,
+		detailCutoff.Format(time.RFC3339), summaryCutoff.Format(time.RFC3339))
 	return nil
 }
 

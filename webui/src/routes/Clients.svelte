@@ -80,7 +80,7 @@
   </div>
 </div>
 
-<!-- names as a pre-joined string: a fresh array every 5s refresh would retrigger
+<!-- names as a pre-joined string: a fresh array every refresh would retrigger
      the Срез effect (double /api/snapshot per tick); an equal string doesn't. -->
 <Srez open={srezOpen} onClose={() => (srezOpen = false)} names={(data?.clients || []).map((c) => c.name).join(',')} />
 

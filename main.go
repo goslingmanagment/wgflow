@@ -8,13 +8,14 @@ import (
 )
 
 type Config struct {
-	Iface           string
-	WGConfigPath    string
-	LogDir          string
-	RollupPath      string
-	FlushInterval   time.Duration
-	RollupRetention time.Duration
-	VPNCIDRs        []string
+	Iface                 string
+	WGConfigPath          string
+	LogDir                string
+	RollupPath            string
+	FlushInterval         time.Duration
+	RollupRetention       time.Duration
+	RollupDetailRetention time.Duration
+	VPNCIDRs              []string
 }
 
 func main() {
@@ -66,7 +67,7 @@ Usage:
   wgflow top --since 5m [--client maxim] [--log-dir /var/log/wgflow] [--limit 30]
   wgflow report --since 24h [--log-dir /var/log/wgflow]
   wgflow rollup-import --since 24h [--reset]
-  wgflow rollup-prune --keep 30d [--rollup /var/lib/wgflow/rollup.db]
+  wgflow rollup-prune --keep 31d [--detail-keep 7d] [--rollup /var/lib/wgflow/rollup.db]
   wgflow stats [--log-dir /var/log/wgflow] [--json]
   wgflow web [--listen :8080] [--log-dir /var/log/wgflow] [--rollup /var/lib/wgflow/rollup.db]
 
