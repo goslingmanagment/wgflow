@@ -55,8 +55,11 @@ const rollupReadOnlyTimeout = time.Second
 // until the scan completes. Keep each exclusive slice small and leave a brief
 // gap between slices so readers and the flush path can make progress.
 const (
-	rollupPruneBatchKeys  = 2048
-	rollupPruneBatchPause = 25 * time.Millisecond
+	rollupPruneBatchKeys = 2048
+	// bbolt retries a busy flock every 50ms. Keep the lock-free interval
+	// longer than that retry cadence so a waiting reader cannot repeatedly
+	// sleep through every gap.
+	rollupPruneBatchPause = 100 * time.Millisecond
 )
 
 type rollupPruneOptions struct {
