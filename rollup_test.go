@@ -134,6 +134,89 @@ func TestPruneRollupTiersKeepsCompactHistoryLonger(t *testing.T) {
 	}
 }
 
+func TestPruneRollupTiersReleasesLockBetweenBatches(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rollup.db")
+	rollup, err := OpenRollup(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rollup.Close()
+
+	now := time.Now().Truncate(time.Minute)
+	old := make([]FlowRecord, 5)
+	for i := range old {
+		old[i] = FlowRecord{
+			TSEnd:               now.Add(-40*24*time.Hour + time.Duration(i)*time.Minute),
+			Client:              "alice",
+			RemoteIP:            "1.1.1.1",
+			RemotePort:          443,
+			Proto:               "tcp",
+			ClientDownloadBytes: 100,
+		}
+	}
+	if err := rollup.Add(old); err != nil {
+		t.Fatal(err)
+	}
+
+	var batches int
+	var hookErr error
+	injected := false
+	detailDeleted, summaryDeleted, err := pruneRollupTiersWithOptions(
+		path,
+		now.Add(-31*24*time.Hour),
+		now.Add(-7*24*time.Hour),
+		rollupPruneOptions{
+			batchKeys: 1,
+			afterBatch: func() {
+				batches++
+				if hookErr != nil {
+					return
+				}
+				db, err := openRollupReadOnly(path)
+				if err != nil {
+					hookErr = err
+					return
+				}
+				if err := db.Close(); err != nil {
+					hookErr = err
+					return
+				}
+				if !injected {
+					injected = true
+					hookErr = rollup.Add([]FlowRecord{{
+						TSEnd:               now,
+						Client:              "alice",
+						RemoteIP:            "9.9.9.9",
+						RemotePort:          443,
+						Proto:               "tcp",
+						ClientDownloadBytes: 900,
+					}})
+				}
+			},
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hookErr != nil {
+		t.Fatalf("database unavailable between prune batches: %v", hookErr)
+	}
+	if batches < 2 {
+		t.Fatalf("prune batches=%d, want multiple batches", batches)
+	}
+	if detailDeleted != 5 || summaryDeleted != 15 {
+		t.Fatalf("deleted detail/summary=%d/%d, want 5/15", detailDeleted, summaryDeleted)
+	}
+
+	byClient, _, _, err := aggregateReportTotalsFromRollup(path, now.Add(-90*24*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := byClient["alice"].Down; got != 900 {
+		t.Fatalf("download after batched prune=%d, want injected recent 900", got)
+	}
+}
+
 func TestRollupAggregatesHonorCanceledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

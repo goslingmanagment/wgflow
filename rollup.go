@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/json"
@@ -49,6 +50,21 @@ type TopAgg struct {
 // pile up; the next UI refresh can retry once the exclusive operation is done.
 const rollupReadOnlyTimeout = time.Second
 
+// Pruning a large bbolt database in one transaction holds its process-wide
+// flock for the entire scan. That makes every web read and capture flush fail
+// until the scan completes. Keep each exclusive slice small and leave a brief
+// gap between slices so readers and the flush path can make progress.
+const (
+	rollupPruneBatchKeys  = 2048
+	rollupPruneBatchPause = 25 * time.Millisecond
+)
+
+type rollupPruneOptions struct {
+	batchKeys  int
+	pause      time.Duration
+	afterBatch func()
+}
+
 // pruneRollup preserves the original single-retention API. New callers should
 // use pruneRollupTiers to keep compact summaries longer than per-target detail.
 func pruneRollup(path string, cutoff time.Time) (int, error) {
@@ -63,71 +79,126 @@ func pruneRollup(path string, cutoff time.Time) (int, error) {
 // must be scanned in full. Cursor deletion avoids copying every expired key
 // into RAM. bbolt reuses freed pages but does not shrink the file on disk.
 func pruneRollupTiers(path string, summaryCutoff, detailCutoff time.Time) (detailDeleted, summaryDeleted int, err error) {
+	return pruneRollupTiersWithOptions(path, summaryCutoff, detailCutoff, rollupPruneOptions{
+		batchKeys: rollupPruneBatchKeys,
+		pause:     rollupPruneBatchPause,
+	})
+}
+
+func pruneRollupTiersWithOptions(path string, summaryCutoff, detailCutoff time.Time, opts rollupPruneOptions) (detailDeleted, summaryDeleted int, err error) {
 	if summaryCutoff.IsZero() && detailCutoff.IsZero() {
 		return 0, 0, nil
 	}
+	if opts.batchKeys <= 0 {
+		opts.batchKeys = rollupPruneBatchKeys
+	}
+
+	if detailDeleted, err = pruneRollupBucketBatched(path, rollupBucket, detailCutoff, true, opts); err != nil {
+		return detailDeleted, summaryDeleted, err
+	}
+	for _, bucket := range [][]byte{rollupClientBucket, rollupCategoryBucket} {
+		deleted, pruneErr := pruneRollupBucketBatched(path, bucket, summaryCutoff, true, opts)
+		summaryDeleted += deleted
+		if pruneErr != nil {
+			return detailDeleted, summaryDeleted, pruneErr
+		}
+	}
+	deleted, err := pruneRollupBucketBatched(path, rollupClientCategoryBucket, summaryCutoff, false, opts)
+	summaryDeleted += deleted
+	return detailDeleted, summaryDeleted, err
+}
+
+func pruneRollupBucketBatched(path string, bucket []byte, cutoff time.Time, minuteFirst bool, opts rollupPruneOptions) (int, error) {
+	if cutoff.IsZero() {
+		return 0, nil
+	}
+	var after []byte
+	totalDeleted := 0
+	for {
+		deleted, next, done, err := pruneRollupBucketBatch(path, bucket, cutoff.Unix()/60, minuteFirst, after, opts.batchKeys)
+		totalDeleted += deleted
+		if err != nil {
+			return totalDeleted, err
+		}
+		// pruneRollupBucketBatch has closed the database at this point, so the
+		// hook and pause both run without an exclusive flock.
+		if opts.afterBatch != nil {
+			opts.afterBatch()
+		}
+		if opts.pause > 0 {
+			time.Sleep(opts.pause)
+		}
+		if done {
+			return totalDeleted, nil
+		}
+		if len(next) == 0 {
+			return totalDeleted, fmt.Errorf("rollup prune bucket %q made no progress", bucket)
+		}
+		after = next
+	}
+}
+
+func pruneRollupBucketBatch(path string, bucket []byte, cutoffMinute int64, minuteFirst bool, after []byte, maxKeys int) (deleted int, next []byte, done bool, err error) {
 	db, err := bolt.Open(path, 0644, &bolt.Options{Timeout: 30 * time.Second})
 	if err != nil {
-		return 0, 0, err
+		return 0, nil, false, err
 	}
-	defer db.Close()
-	deleteMinutePrefixed := func(tx *bolt.Tx, bucket []byte, cutoff time.Time, count *int) error {
-		if cutoff.IsZero() {
-			return nil
+	defer func() {
+		if closeErr := db.Close(); err == nil && closeErr != nil {
+			err = closeErr
 		}
+	}()
+
+	err = db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket(bucket)
 		if b == nil {
+			done = true
 			return nil
 		}
-		cutoffMinute := cutoff.Unix() / 60
 		c := b.Cursor()
-		for k, _ := c.First(); k != nil; k, _ = c.Next() {
-			m := minutePrefix(k)
-			if m < 0 {
-				continue
-			}
-			if m >= cutoffMinute {
-				break
-			}
-			if err := c.Delete(); err != nil {
-				return err
-			}
-			(*count)++
-		}
-		return nil
-	}
-	err = db.Update(func(tx *bolt.Tx) error {
-		if err := deleteMinutePrefixed(tx, rollupBucket, detailCutoff, &detailDeleted); err != nil {
-			return err
-		}
-		for _, name := range [][]byte{rollupClientBucket, rollupCategoryBucket} {
-			if err := deleteMinutePrefixed(tx, name, summaryCutoff, &summaryDeleted); err != nil {
-				return err
+		k, _ := c.First()
+		if len(after) > 0 {
+			k, _ = c.Seek(after)
+			if bytes.Equal(k, after) {
+				k, _ = c.Next()
 			}
 		}
-		if !summaryCutoff.IsZero() {
-			b := tx.Bucket(rollupClientCategoryBucket)
-			if b == nil {
+		processed := 0
+		for ; k != nil && processed < maxKeys; k, _ = c.Next() {
+			key := append([]byte(nil), k...)
+			minute, valid := pruneRollupKeyMinute(k, minuteFirst)
+			if minuteFirst && valid && minute >= cutoffMinute {
+				done = true
 				return nil
 			}
-			cutoffMinute := summaryCutoff.Unix() / 60
-			c := b.Cursor()
-			for k, _ := c.First(); k != nil; k, _ = c.Next() {
-				parts := strings.SplitN(string(k), "\t", 3)
-				if len(parts) != 3 {
-					continue
+			next = key
+			processed++
+			if valid && minute < cutoffMinute {
+				if err := c.Delete(); err != nil {
+					return err
 				}
-				if m, err := strconv.ParseInt(parts[1], 10, 64); err == nil && m < cutoffMinute {
-					if err := c.Delete(); err != nil {
-						return err
-					}
-					summaryDeleted++
-				}
+				deleted++
 			}
+		}
+		if k == nil {
+			done = true
 		}
 		return nil
 	})
-	return detailDeleted, summaryDeleted, err
+	return deleted, next, done, err
+}
+
+func pruneRollupKeyMinute(k []byte, minuteFirst bool) (int64, bool) {
+	if minuteFirst {
+		minute := minutePrefix(k)
+		return minute, minute >= 0
+	}
+	parts := strings.SplitN(string(k), "\t", 3)
+	if len(parts) != 3 {
+		return 0, false
+	}
+	minute, err := strconv.ParseInt(parts[1], 10, 64)
+	return minute, err == nil
 }
 
 // minutePrefix parses the leading zero-padded minute from a rollup key, or -1.
