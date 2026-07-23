@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"flag"
@@ -126,8 +124,9 @@ func webCmd(args []string) error {
 	iface := fset.String("iface", "wg0", "interface label")
 	clientsConfig := fset.String("clients-config", "/etc/wgflow/clients.yaml", "client alias config for person grouping (optional)")
 	asnDBPath := fset.String("asn-db", "", "ASN .mmdb database (db-ip ASN Lite / GeoLite2-ASN) used to name IP owners the builtin table misses (optional)")
-	authPassword := fset.String("auth-password", os.Getenv("WGFLOW_WEB_PASSWORD"), "HTTP Basic Auth password; defaults to WGFLOW_WEB_PASSWORD")
-	authRealm := fset.String("auth-realm", "wgflow", "HTTP Basic Auth realm")
+	authPassword := fset.String("auth-password", os.Getenv("WGFLOW_WEB_PASSWORD"), "web login password; defaults to WGFLOW_WEB_PASSWORD")
+	authCookieDomain := fset.String("auth-cookie-domain", os.Getenv("WGFLOW_WEB_COOKIE_DOMAIN"), "optional parent domain for sharing a login cookie between wgflow hosts; defaults to WGFLOW_WEB_COOKIE_DOMAIN")
+	_ = fset.String("auth-realm", "wgflow", "deprecated Basic Auth realm (accepted for command-line compatibility)")
 	allowNoAuth := fset.Bool("allow-no-auth", false, "serve without a password even on a non-loopback address (dangerous: the whole household's traffic becomes public)")
 	tzName := fset.String("tz", "Europe/Moscow", "IANA time zone for day bucketing (backend only; the frontend still labels hours in MSK)")
 	if err := fset.Parse(args); err != nil {
@@ -171,9 +170,9 @@ func webCmd(args []string) error {
 	s.routes(mux)
 	handler := http.Handler(mux)
 	if *authPassword != "" {
-		handler = basicAuthHandler(handler, *authPassword, *authRealm)
+		handler = newPasswordAuth(*authPassword, *authCookieDomain).wrap(handler)
 	}
-	log.Printf("wgflow web listening on %s (log-dir=%s rollup=%s auth=%t)", *listen, *logDir, *rollupPath, *authPassword != "")
+	log.Printf("wgflow web listening on %s (log-dir=%s rollup=%s password_login=%t cookie_domain=%q)", *listen, *logDir, *rollupPath, *authPassword != "", *authCookieDomain)
 	srv := &http.Server{
 		Addr:    *listen,
 		Handler: handler,
@@ -239,21 +238,6 @@ func requireGET(h http.HandlerFunc) http.HandlerFunc {
 		}
 		h(w, r)
 	}
-}
-
-func basicAuthHandler(next http.Handler, password, realm string) http.Handler {
-	passwordHash := sha256.Sum256([]byte(password))
-	realm = strings.ReplaceAll(realm, `"`, "")
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, gotPassword, ok := r.BasicAuth()
-		gotHash := sha256.Sum256([]byte(gotPassword))
-		if !ok || subtle.ConstantTimeCompare(gotHash[:], passwordHash[:]) != 1 {
-			w.Header().Set("WWW-Authenticate", fmt.Sprintf(`Basic realm="%s", charset="UTF-8"`, realm))
-			http.Error(w, "authentication required", http.StatusUnauthorized)
-			return
-		}
-		next.ServeHTTP(w, r)
-	})
 }
 
 // asnDB adapts a MaxMind-format ASN database (db-ip ASN Lite, GeoLite2-ASN)

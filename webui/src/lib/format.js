@@ -3,6 +3,7 @@
 // SSE stream — a single hung request would queue everything behind it and
 // freeze the whole panel. `signal` (optional) lets callers abort earlier.
 const FETCH_TIMEOUT_MS = 10_000
+let loginRedirectStarted = false
 
 export async function getJSON(url, signal) {
   const c = new AbortController()
@@ -19,6 +20,11 @@ export async function getJSON(url, signal) {
   try {
     const r = await fetch(url, { signal: c.signal })
     if (!r.ok) {
+      if (r.status === 401 && !loginRedirectStarted) {
+        loginRedirectStarted = true
+        const next = location.pathname + location.search + location.hash
+        location.replace('/login?next=' + encodeURIComponent(next))
+      }
       const e = new Error('HTTP ' + r.status)
       e.status = r.status
       throw e
