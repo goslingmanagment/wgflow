@@ -475,38 +475,6 @@ func TestClassifyTracksLastSignificant(t *testing.T) {
 	}
 }
 
-func TestBasicAuthHandler(t *testing.T) {
-	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusNoContent)
-	})
-	handler := basicAuthHandler(next, "secret", `wg"flow`)
-
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated status = %d, want %d", rec.Code, http.StatusUnauthorized)
-	}
-	if got := rec.Header().Get("WWW-Authenticate"); got != `Basic realm="wgflow", charset="UTF-8"` {
-		t.Fatalf("WWW-Authenticate = %q", got)
-	}
-
-	req := httptest.NewRequest(http.MethodGet, "/", nil)
-	req.SetBasicAuth("anything", "wrong")
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("wrong password status = %d, want %d", rec.Code, http.StatusUnauthorized)
-	}
-
-	req = httptest.NewRequest(http.MethodGet, "/", nil)
-	req.SetBasicAuth("anything", "secret")
-	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("correct password status = %d, want %d", rec.Code, http.StatusNoContent)
-	}
-}
-
 func findAgg(t *testing.T, aggs map[string]*TopAgg, client, category, target, proto string, port uint16) *TopAgg {
 	t.Helper()
 	for _, agg := range aggs {

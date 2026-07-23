@@ -9,6 +9,8 @@ Type=simple
 # To expose it directly, change the listen address and set WGFLOW_WEB_PASSWORD below.
 ExecStart=/usr/local/bin/wgflow web --listen 127.0.0.1:8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db --wg-config /etc/wireguard/wg0.conf
 # Environment=WGFLOW_WEB_PASSWORD=change-me
+# Optional: share the signed login cookie across sibling hostnames.
+# Environment=WGFLOW_WEB_COOKIE_DOMAIN=.vpn.example.com
 Restart=always
 RestartSec=3
 User=root

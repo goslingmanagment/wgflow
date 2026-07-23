@@ -76,16 +76,35 @@ pnpm --dir webui dev
 ```
 
 The panel is read-only. Listening on a non-loopback address **requires** a
-Basic Auth password — without one the server refuses to start (override with
+password — without one the server refuses to start (override with
 `--allow-no-auth` if you really know what you are doing):
 
 ```sh
 WGFLOW_WEB_PASSWORD='change-me' wgflow web --listen :8080
 ```
 
-Basic Auth travels in cleartext — the panel itself does not do TLS. Keep it
-reachable only over WireGuard, an SSH tunnel, or a TLS-terminating reverse
-proxy; do not expose the bare port to the internet.
+Opening the panel shows a password-only login page. A successful login creates
+an HttpOnly, signed cookie for one year; it is renewed while the panel is used,
+survives `wgflow` restarts, and is invalidated when the password changes.
+Pre-emptive Basic Auth remains accepted for existing scripts, but the server no
+longer sends a browser Basic Auth challenge.
+
+To share one login between panels on sibling hostnames, use the same password on
+both servers and set their common parent cookie domain:
+
+```sh
+WGFLOW_WEB_PASSWORD='change-me' \
+WGFLOW_WEB_COOKIE_DOMAIN='.vpn.example.com' \
+wgflow web --listen :8080
+```
+
+Browser security does not allow sharing cookies between unrelated domains or
+different IP addresses; those require one login per server, after which each
+login remains saved.
+
+The password and session cookie travel in cleartext when the panel itself is
+plain HTTP. Keep it reachable only over WireGuard, an SSH tunnel, or a
+TLS-terminating reverse proxy; do not expose the bare port to the internet.
 
 Day buckets and minute timelines are aggregated in the timezone given by
 `--tz` (default `Europe/Moscow`). The UI currently formats times as MSK, so if
