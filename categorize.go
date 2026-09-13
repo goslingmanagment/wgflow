@@ -220,7 +220,7 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 		return "games"
 	case containsAny(t, "akamai", "akamaized", "fastly", "edgekey", "edgesuite", "llnwd", "cdn77", "jsdelivr", "stackpath"):
 		return "cdn"
-	case port == 6881 || (port >= 6881 && port <= 6999):
+	case port == 51413 || (port >= 6881 && port <= 6999): // BitTorrent (Transmission default, classic range)
 		return "p2p"
 	default:
 		// Named target that matched no domain rule: the port heuristics get the
@@ -303,7 +303,7 @@ func categorizeByPort(proto string, port uint16, ip string) string {
 	switch proto {
 	case "tcp":
 		switch port {
-		case 1180, 12324: // nested SOCKS/VPN tunnels observed in production
+		case 1180, 12324, 31010, 55511: // nested SOCKS/VPN tunnels observed in production
 			return "proxy"
 		}
 	case "udp":
