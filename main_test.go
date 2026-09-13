@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -226,6 +227,99 @@ func TestNewAPIFlowEnrichesKnownBareIPs(t *testing.T) {
 	}
 }
 
+// The org of a bare IP may name the row; the org of a NAMED row may not touch
+// it. The old code appended the org to the name before categorizing, so every
+// app behind a CDN read as "aws"/"cloudflare"/"cdn" — the road, not the
+// destination. These are the exact probes from that investigation.
+func TestNewAPIFlowCategoryUsesOrgOnlyForBareIPs(t *testing.T) {
+	const MB = 1 << 20
+	cases := []struct {
+		name          string
+		agg           TopAgg
+		app           string
+		wantCat       string
+		wantService   string
+		wantRole      string
+		wantDirection string
+	}{
+		{
+			name:          "app on a CloudFront edge is the app, not aws",
+			agg:           TopAgg{Client: "diana-iphone", Category: "other", Target: "3.171.214.100", Proto: "udp", Port: 443, Up: 4 * MB, Down: 1 * MB},
+			app:           "upload.picsart.com",
+			wantCat:       "other",
+			wantService:   "picsart.com",
+			wantDirection: "upload",
+		},
+		{
+			name:        "app on a Cloudflare edge is the app, not cloudflare",
+			agg:         TopAgg{Client: "diana-iphone", Category: "other", Target: "104.29.153.158", Proto: "udp", Port: 443, Down: 2000},
+			app:         "upload.picsart.com",
+			wantCat:     "other",
+			wantService: "picsart.com",
+		},
+		{
+			name:    "bare Akamai IP with no name falls back to its org",
+			agg:     TopAgg{Client: "diana-iphone", Category: "other", Target: "2.16.1.1", Proto: "udp", Port: 443, Down: 2000},
+			wantCat: "cdn",
+		},
+		{
+			name:    "bare Cloudflare IP with no name stays cloudflare",
+			agg:     TopAgg{Client: "diana-iphone", Category: "other", Target: "104.29.153.158", Proto: "udp", Port: 443, Down: 2000},
+			wantCat: "cloudflare",
+		},
+		{
+			name:    "a Google Cloud range is a tenant's traffic, not Google's",
+			agg:     TopAgg{Client: "diana-iphone", Category: "other", Target: "34.64.1.1", Proto: "udp", Port: 443, Down: 2000},
+			wantCat: "other",
+		},
+		{
+			name:        "named row heals a stored cloudflare label even down to other",
+			agg:         TopAgg{Client: "diana-iphone", Category: "cloudflare", Target: "static.example", Proto: "tcp", Port: 443, Down: 2000},
+			wantCat:     "other",
+			wantService: "static.example", // unknown host: it names itself, nothing is invented
+		},
+		{
+			name:        "named ad SDK wins over a stored infra label",
+			agg:         TopAgg{Client: "diana-iphone", Category: "cloudflare", Target: "ms.applovin.com", Proto: "tcp", Port: 443, Down: 2000},
+			wantCat:     "ads",
+			wantService: "AppLovin",
+			wantRole:    roleAds,
+		},
+		{
+			name:          "media row keeps its brand and reports a download",
+			agg:           TopAgg{Client: "diana-iphone", Category: "", Target: "rr4---sn-1.googlevideo.com", Proto: "tcp", Port: 443, Down: 20 * MB, Up: 100 << 10},
+			wantCat:       "google",
+			wantService:   "YouTube",
+			wantRole:      roleMedia,
+			wantDirection: "download",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			agg := tc.agg
+			var attrs map[string]apiFlowAttribution
+			if tc.app != "" {
+				attrs = map[string]apiFlowAttribution{
+					flowAttributionKey(agg.Client, agg.Target): {AppTarget: tc.app, Source: "TLS SNI"},
+				}
+			}
+			f := newAPIFlowWithAttribution(&agg, attrs)
+			if f.Category != tc.wantCat {
+				t.Errorf("category = %q, want %q (org=%q)", f.Category, tc.wantCat, f.TargetOrg)
+			}
+			if f.Service != tc.wantService {
+				t.Errorf("service = %q, want %q", f.Service, tc.wantService)
+			}
+			if f.Role != tc.wantRole {
+				t.Errorf("role = %q, want %q", f.Role, tc.wantRole)
+			}
+			if f.Direction != tc.wantDirection {
+				t.Errorf("direction = %q, want %q", f.Direction, tc.wantDirection)
+			}
+		})
+	}
+}
+
 func TestSnapshotFromRollup(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rollup.db")
 	rollup, err := OpenRollup(path)
@@ -424,24 +518,37 @@ func TestClassifyRules(t *testing.T) {
 		series         []uint64
 		total          uint64
 		cats           []apiCatShare
+		sdkHits        int
 		devKind        string
 		lastTLS        time.Time
 		loggerOK       bool
 		wantStatus     string
 		wantConfidence string
+		wantSDKReason  bool
 	}{
-		{"silent confirmed", []uint64{0, 0, 0}, 0, nil, "phone", zero, true, "silent", "high"},
-		{"silent unconfirmed (logger down)", []uint64{0, 0, 0}, 0, nil, "phone", zero, false, "silent", "low"},
-		{"sustained stream on phone", []uint64{2 * MB, 2 * MB, 3 * MB}, 7 * MB, cat("yandex", 7*MB), "phone", fresh, true, "active", "high"},
-		{"sustained stream on laptop is softer", []uint64{2 * MB, 2 * MB}, 4 * MB, cat("yandex", 4*MB), "laptop", zero, true, "active", "medium"},
-		{"tens of MB in one burst", []uint64{25 * MB}, 25 * MB, cat("google", 25*MB), "phone", zero, true, "active", "high"},
-		{"fresh TLS to non-background", []uint64{200 * KB}, 200 * KB, cat("meta", 200*KB), "phone", fresh, true, "active", "medium"},
-		{"apple-only small is background", []uint64{30 * KB, 25 * KB}, 55 * KB, cat("apple", 55*KB), "laptop", zero, true, "likely-background", "high"},
-		{"small non-background, no fresh trace", []uint64{150 * KB}, 150 * KB, cat("meta", 150*KB), "phone", zero, true, "likely-background", "low"},
+		{"silent confirmed", []uint64{0, 0, 0}, 0, nil, 0, "phone", zero, true, "silent", "high", false},
+		{"silent unconfirmed (logger down)", []uint64{0, 0, 0}, 0, nil, 0, "phone", zero, false, "silent", "low", false},
+		{"sustained stream on phone", []uint64{2 * MB, 2 * MB, 3 * MB}, 7 * MB, cat("yandex", 7*MB), 0, "phone", fresh, true, "active", "high", false},
+		{"sustained stream on laptop is softer", []uint64{2 * MB, 2 * MB}, 4 * MB, cat("yandex", 4*MB), 0, "laptop", zero, true, "active", "medium", false},
+		{"tens of MB in one burst", []uint64{25 * MB}, 25 * MB, cat("google", 25*MB), 0, "phone", zero, true, "active", "high", false},
+		{"fresh TLS to non-background", []uint64{200 * KB}, 200 * KB, cat("meta", 200*KB), 0, "phone", fresh, true, "active", "medium", false},
+		{"apple-only small is background", []uint64{30 * KB, 25 * KB}, 55 * KB, cat("apple", 55*KB), 0, "laptop", zero, true, "likely-background", "high", false},
+		{"small non-background, no fresh trace", []uint64{150 * KB}, 150 * KB, cat("meta", 150*KB), 0, "phone", zero, true, "likely-background", "low", false},
+		// SDK hosts annotate the volume rules without changing their verdict.
+		{"stream with ad SDKs still high", []uint64{2 * MB, 2 * MB, 3 * MB}, 7 * MB, cat("ads", 7*MB), 5, "phone", fresh, true, "active", "high", true},
+		{"burst with ad SDKs", []uint64{25 * MB}, 25 * MB, cat("ads", 25*MB), 3, "phone", zero, true, "active", "high", true},
+		// The new case: too small for the byte rules, but ad SDKs do not run
+		// on their own — one >100KB minute or a fresh trace is enough.
+		{"ad SDKs + one significant minute", []uint64{150 * KB}, 150 * KB, cat("ads", 150*KB), 7, "phone", zero, true, "active", "medium", true},
+		{"ad SDKs on a laptop are softer", []uint64{150 * KB}, 150 * KB, cat("ads", 150*KB), 7, "laptop", zero, true, "active", "low", true},
+		{"ad SDKs behind apple-only, fresh trace", []uint64{40 * KB}, 40 * KB, cat("apple", 40*KB), 2, "phone", fresh, true, "active", "medium", true},
+		// Without a fresh trace or a significant minute the SDK hint is not
+		// enough on its own: no rule invents activity from a whisper.
+		{"ad SDKs but only a whisper", []uint64{40 * KB}, 40 * KB, cat("ads", 40*KB), 2, "phone", zero, true, "likely-background", "low", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			v := classify(tc.series, start, tc.total, tc.cats, tc.devKind, tc.lastTLS, zero, now, tc.loggerOK)
+			v := classify(tc.series, start, tc.total, tc.cats, tc.sdkHits, tc.devKind, tc.lastTLS, zero, now, tc.loggerOK)
 			if v.Status != tc.wantStatus {
 				t.Errorf("status = %q, want %q (reasons: %v)", v.Status, tc.wantStatus, v.Reasons)
 			}
@@ -450,6 +557,18 @@ func TestClassifyRules(t *testing.T) {
 			}
 			if len(v.Reasons) == 0 {
 				t.Errorf("verdict has no reasons — every classification must explain its firing rule")
+			}
+			if v.Evidence.SDKHits != tc.sdkHits {
+				t.Errorf("evidence.sdk_hits = %d, want %d", v.Evidence.SDKHits, tc.sdkHits)
+			}
+			gotSDKReason := false
+			for _, r := range v.Reasons {
+				if strings.Contains(r, "SDK рекламы/аналитики") {
+					gotSDKReason = true
+				}
+			}
+			if gotSDKReason != tc.wantSDKReason {
+				t.Errorf("SDK reason present = %v, want %v (reasons: %v)", gotSDKReason, tc.wantSDKReason, v.Reasons)
 			}
 		})
 	}
@@ -461,7 +580,7 @@ func TestClassifyTracksLastSignificant(t *testing.T) {
 	start := now.Add(-5*time.Minute).Unix() / 60
 	// minutes: [push, big, push, quiet, quiet] -> last >100KB is index 1
 	series := []uint64{20 * KB, 2 * MB, 20 * KB, 0, 0}
-	v := classify(series, start, 2*MB+40*KB, []apiCatShare{{Category: "yandex", Bytes: 2 * MB}}, "phone", time.Time{}, time.Time{}, now, true)
+	v := classify(series, start, 2*MB+40*KB, []apiCatShare{{Category: "yandex", Bytes: 2 * MB}}, 0, "phone", time.Time{}, time.Time{}, now, true)
 	if v.LastSignificantAt == nil {
 		t.Fatal("expected a last_significant_at")
 	}

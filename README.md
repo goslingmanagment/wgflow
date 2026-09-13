@@ -144,6 +144,47 @@ The database is consulted only after the builtin table misses, only in the web
 layer (never on the capture path). A missing or corrupt file logs a warning
 and the panel runs without it.
 
+### Service, role and direction
+
+Every traffic row carries three labels next to its category:
+
+- `service` — who is on the other end: a label from a builtin rules table
+  (`AppLovin`, `App Store`, `Instagram/Facebook`) or, by default, the
+  registrable domain (`upload.picsart.com` becomes `picsart.com`). A bare IP
+  gets no service — an unnamed target never has a name invented for it.
+- `role` — what kind of endpoint it is: `ads`, `telemetry`, `push`, `cdn`,
+  `media`, `sync`, `proxy` or `dns`, and empty wherever the hostname is
+  ambiguous (`graph.facebook.com` is both an app and an SDK, so it gets none).
+- `direction` — `upload` when the client sent at least three times what it
+  received, `download` for the mirror case, empty for balanced or small flows.
+
+Ad and telemetry hosts also get the `ads` category, so one app with an ad
+mediation stack no longer spreads itself across `cloudflare`, `google` and
+`other`. On a client page two or more such rows collapse into a single
+`ads/telemetry` row (with `members` and `member_names`), so an ad swarm cannot
+push the apps the person actually used out of the table; the totals, the
+category donut and the verdict keep the unfolded numbers. The verdict may cite
+SDK hosts as one of its reasons — hedged like all the others: it states the rule
+that fired, never what a person did.
+
+Service and role are computed when a page is rendered, not when traffic is
+captured, so correcting a rule re-labels the history that is still retained. The
+category is the exception: it is frozen into the rollup key at capture time.
+Extend or correct the table from `clients.yaml`:
+
+```yaml
+services:
+  "picsart.com":
+    service: Picsart
+  "ads.example.net":
+    role: ads
+    category: ads
+  "applovin.com": {}        # an empty mapping drops a builtin rule
+```
+
+Keys are hostname suffixes: a key matches the apex and every label beneath it,
+and the longest suffix wins.
+
 ## Development
 
 `go test ./...` runs the unit suite. The packet, DNS, TLS and QUIC parsers all

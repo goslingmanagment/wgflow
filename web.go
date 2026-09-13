@@ -86,6 +86,22 @@ const (
 	detailRecentEvents     = 12
 	tlsRecentSample        = 30
 	snapshotSitesPerClient = 4
+	// How many distinct services the board's tail scan keeps per client. The
+	// displayed "current site" is still the newest one; the rest exist so the
+	// newest NON-SDK service can be named when an ad SDK spoke last.
+	boardServicesPerClient = 4
+	// Folding an SDK swarm into one row needs at least this many rows (a lone
+	// SDK row stays itself — a group of one explains nothing) and shows at most
+	// this many member names.
+	sdkFoldMinRows     = 2
+	sdkFoldMemberNames = 6
+)
+
+// The synthetic folded ad/telemetry row's identity. "sdk" is deliberately not a
+// hostname: nothing was ever contacted under that name.
+const (
+	sdkFoldTarget  = "sdk"
+	sdkFoldService = "ads/telemetry"
 )
 
 type webServer struct {
@@ -604,15 +620,30 @@ type apiFlow struct {
 	TargetOrg             string   `json:"target_org,omitempty"`
 	AttributionSource     string   `json:"attribution_source,omitempty"`
 	AttributionCandidates []string `json:"attribution_candidates,omitempty"`
-	Proto                 string   `json:"proto"`
-	Port                  uint16   `json:"port"`
-	Down                  uint64   `json:"down"`
-	Up                    uint64   `json:"up"`
-	Total                 uint64   `json:"total"`
+	// Service and Role are read-time labels for the DISPLAY target (see
+	// service.go): who the endpoint belongs to and what kind of endpoint it is.
+	// Both stay empty for a bare IP — a row with no name never gets one
+	// invented for it. Because they are computed on read, a rules change
+	// re-labels all retained history; only Category is frozen at capture.
+	Service string `json:"service,omitempty"`
+	Role    string `json:"role,omitempty"`
+	Proto   string `json:"proto"`
+	Port    uint16 `json:"port"`
+	Down    uint64 `json:"down"`
+	Up      uint64 `json:"up"`
+	Total   uint64 `json:"total"`
+	// Direction is the byte-skew hint: "upload", "download" or "" for balanced
+	// or too-small flows. A hint, not a claim about what was transferred.
+	Direction string `json:"direction,omitempty"`
 	// IsIP marks a target we could not resolve to a hostname (no SNI, no DNS) —
 	// usually QUIC. The UI labels these "no hostname (QUIC)" instead of showing a
 	// bare IP that reads like a fabricated or missing domain.
 	IsIP bool `json:"is_ip"`
+	// Members/MemberNames are set only on the synthetic folded ad/telemetry row
+	// (see foldSDKRows): how many per-target rows it stands for and the biggest
+	// of them by bytes.
+	Members     int      `json:"members,omitempty"`
+	MemberNames []string `json:"member_names,omitempty"`
 }
 
 func newAPIFlow(a *TopAgg) apiFlow {
@@ -713,23 +744,43 @@ func newAPIFlowWithAttribution(a *TopAgg, attrs map[string]apiFlowAttribution) a
 	if !isIP {
 		appTarget = a.Target
 	}
-	targetForCat := a.Target
+	// The display target is what the reader sees (app_target -> resolved ->
+	// target, the apiFlowDisplayTarget precedence), so it is also what we
+	// categorize and label. The org is NOT appended to it: feeding "Amazon
+	// CloudFront" into a name matcher made every app on a CloudFront edge read
+	// as "aws". An org can only speak where there is no name at all.
+	displayTarget := a.Target
 	if appTarget != "" {
-		targetForCat = appTarget
+		displayTarget = appTarget
 	} else if resolved != "" {
-		targetForCat = resolved
+		displayTarget = resolved
 	}
 	category := a.Category
-	if org != "" {
-		targetForCat += " " + org
+	better := categorize(displayTarget, a.Target, a.Proto, a.Port)
+	if better == "other" && net.ParseIP(displayTarget) != nil {
+		if fromOrg := categoryForOrg(org); fromOrg != "" {
+			better = fromOrg
+		}
 	}
-	if better := categorize(targetForCat, a.Target, a.Proto, a.Port); better != "other" && (category == "" || category == "other" || isIP) {
+	switch {
+	case better != "other" && (category == "" || category == "other" || isIP):
 		category = better
+	case !isIP && ipDerivedInfraCategories[category]:
+		// Self-heal: a named target can only have been labelled cloudflare/aws/
+		// cdn by the old IP-leak bug, and that label sits in up to 7 days of
+		// rollup history. Prefer today's honest answer even when it is "other".
+		category = better
+	}
+	service, role := "", ""
+	if net.ParseIP(displayTarget) == nil {
+		service = targetService(displayTarget)
+		role = targetRole(displayTarget)
 	}
 	return apiFlow{
 		Client: a.Client, Category: category, Target: a.Target, AppTarget: appTarget, ResolvedTarget: resolved, TargetOrg: org,
-		AttributionSource: attrSource, AttributionCandidates: attrCandidates, Proto: a.Proto, Port: a.Port,
-		Down: a.Down, Up: a.Up, Total: a.Down + a.Up, IsIP: isIP,
+		AttributionSource: attrSource, AttributionCandidates: attrCandidates, Service: service, Role: role,
+		Proto: a.Proto, Port: a.Port, Down: a.Down, Up: a.Up, Total: a.Down + a.Up,
+		Direction: directionHint(a.Up, a.Down), IsIP: isIP,
 	}
 }
 
@@ -990,16 +1041,21 @@ func (s *webServer) scanFlowAttributionsContext(ctx context.Context, from, to ti
 }
 
 type apiClient struct {
-	Name        string        `json:"name"`
-	Down        uint64        `json:"down"`
-	Up          uint64        `json:"up"`
-	Total       uint64        `json:"total"`
-	TopCategory string        `json:"top_category"`
-	CurrentSite string        `json:"current_site"`
-	Series      []uint64      `json:"series"`
-	Cats        []apiCatShare `json:"cats"`
-	DeviceKind  string        `json:"device_kind"`
-	Person      string        `json:"person"`
+	Name        string `json:"name"`
+	Down        uint64 `json:"down"`
+	Up          uint64 `json:"up"`
+	Total       uint64 `json:"total"`
+	TopCategory string `json:"top_category"`
+	CurrentSite string `json:"current_site"`
+	// CurrentService/CurrentRole name the newest non-SDK service behind the
+	// recent SNIs ("" when every recent name was an ad/telemetry host): the
+	// readable half of current_site, computed at read time.
+	CurrentService string        `json:"current_service"`
+	CurrentRole    string        `json:"current_role"`
+	Series         []uint64      `json:"series"`
+	Cats           []apiCatShare `json:"cats"`
+	DeviceKind     string        `json:"device_kind"`
+	Person         string        `json:"person"`
 	// EncryptedDNS: the window shows DoH/DoT evidence (known resolver SNI or
 	// port 853), so dns.jsonl is incomplete for this client and domain
 	// attribution may undercount.
@@ -1028,6 +1084,10 @@ type apiEvidence struct {
 	DeviceKind   string     `json:"device_kind"`
 	TotalBytes   uint64     `json:"total_bytes"`
 	FreshTLSDNS  bool       `json:"fresh_tls_dns"` // a TLS or DNS trace within ~3 min
+	// SDKHits counts DISTINCT ad/telemetry SDK hosts seen in the window. Those
+	// SDKs report from a launched app, so a non-zero count is evidence that
+	// something was open — evidence, never proof of what a person did.
+	SDKHits int `json:"sdk_hits"`
 }
 
 // deviceKind infers phone/laptop from the WireGuard peer name. Heuristic; an
@@ -1080,7 +1140,7 @@ func freshWithin(t, now time.Time, d time.Duration) bool {
 // a human acted. It reads the cheap per-minute byte series plus last TLS/DNS
 // freshness and the device kind. SILENT requires loggerOK so an outage is never
 // branded as quiet.
-func classify(series []uint64, startMinute int64, total uint64, cats []apiCatShare, devKind string, lastTLS, lastDNS, now time.Time, loggerOK bool) apiVerdict {
+func classify(series []uint64, startMinute int64, total uint64, cats []apiCatShare, sdkHits int, devKind string, lastTLS, lastDNS, now time.Time, loggerOK bool) apiVerdict {
 	var minOver1MB, minOver100KB int
 	var lastAnyMin, lastSigMin int64 = -1, -1
 	for i, b := range series {
@@ -1099,7 +1159,7 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 	fresh := freshWithin(lastTLS, now, freshSignalWindow) || freshWithin(lastDNS, now, freshSignalWindow)
 	ev := apiEvidence{
 		MinOver1MB: minOver1MB, MinOver100KB: minOver100KB,
-		DeviceKind: devKind, TotalBytes: total, FreshTLSDNS: fresh,
+		DeviceKind: devKind, TotalBytes: total, FreshTLSDNS: fresh, SDKHits: sdkHits,
 	}
 	if lastAnyMin >= 0 {
 		t := time.Unix(lastAnyMin*60, 0)
@@ -1127,6 +1187,14 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 			v.Reasons = append(v.Reasons, "только apple — Apple Music или iCloud, не доказуемо как фон")
 		}
 	}
+	// Ad/telemetry SDKs phone home from a launched app, so their hosts hint at
+	// a foreground app — hedged like every other reason: it names the rule that
+	// fired ("SDK hosts were seen"), not what the person was doing.
+	sdkReason := func() {
+		if sdkHits > 0 {
+			v.Reasons = append(v.Reasons, fmt.Sprintf("SDK рекламы/аналитики (%d хостов) — вероятно открытое приложение с рекламой", sdkHits))
+		}
+	}
 
 	switch {
 	case total == 0:
@@ -1148,6 +1216,7 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 		if laptop {
 			v.Reasons = append(v.Reasons, "ноутбук — оценка мягче")
 		}
+		sdkReason()
 		hedgeApple()
 	case total >= activeTotalBytes:
 		v.Status = "active"
@@ -1156,11 +1225,25 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 		if laptop {
 			v.Reasons = append(v.Reasons, "ноутбук — оценка мягче")
 		}
+		sdkReason()
 		hedgeApple()
 	case fresh && !bgOnly:
 		v.Status = "active"
 		v.Confidence = boolPick(phone, "medium", "low")
 		v.Reasons = append(v.Reasons, "свежий TLS/DNS <3 мин к не-фоновой категории")
+		if laptop {
+			v.Reasons = append(v.Reasons, "ноутбук — мог быть фоновый процесс")
+		}
+		sdkReason()
+	// SDK hosts with either a fresh trace or one >100KB minute: too small for
+	// the byte rules and possibly all on background categories, yet an ad SDK
+	// does not run on its own. Below the byte rules on purpose — this is the
+	// weakest active signal, so it never upgrades a confidence the volume
+	// rules already earned.
+	case sdkHits > 0 && (fresh || minOver100KB > 0):
+		v.Status = "active"
+		v.Confidence = boolPick(phone, "medium", "low")
+		sdkReason()
 		if laptop {
 			v.Reasons = append(v.Reasons, "ноутбук — мог быть фоновый процесс")
 		}
@@ -1296,7 +1379,7 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 			snaps[dev] = &snapClient{cats: map[string]uint64{}}
 		}
 	}
-	sites, lastTLS, encDNS, scanErr := s.lastSitesByClientContext(r.Context(), cutoff)
+	sites, services, lastTLS, encDNS, sdkHits, scanErr := s.lastSitesByClientContext(r.Context(), cutoff)
 	if scanErr != nil {
 		return
 	}
@@ -1307,24 +1390,27 @@ func (s *webServer) handleClients(w http.ResponseWriter, r *http.Request) {
 	clients := make([]*apiClient, 0, len(snaps))
 	for name, sc := range snaps {
 		cats := mapToShares(sc.cats)
+		svc, role := currentService(services[name])
 		c := &apiClient{
-			Name:         name,
-			Down:         sc.down,
-			Up:           sc.up,
-			Total:        sc.down + sc.up,
-			Cats:         cats,
-			Series:       sc.series,
-			CurrentSite:  sites[name],
-			DeviceKind:   s.resolveDeviceKind(name),
-			Person:       s.aliases.Person(name),
-			EncryptedDNS: encDNS[name],
+			Name:           name,
+			Down:           sc.down,
+			Up:             sc.up,
+			Total:          sc.down + sc.up,
+			Cats:           cats,
+			Series:         sc.series,
+			CurrentSite:    sites[name],
+			CurrentService: svc,
+			CurrentRole:    role,
+			DeviceKind:     s.resolveDeviceKind(name),
+			Person:         s.aliases.Person(name),
+			EncryptedDNS:   encDNS[name],
 		}
 		if len(cats) > 0 {
 			c.TopCategory = cats[0].Category
 		}
 		v := unknownVerdict()
 		if dbOK {
-			v = classify(sc.series, startMinute, c.Total, cats, c.DeviceKind, lastTLS[name], lastDNS[name], now, loggerOK)
+			v = classify(sc.series, startMinute, c.Total, cats, sdkHits[name], c.DeviceKind, lastTLS[name], lastDNS[name], now, loggerOK)
 		}
 		c.Verdict = &v
 		clients = append(clients, c)
@@ -1344,10 +1430,13 @@ type apiSnapshotClient struct {
 	MinutesOver1MB  int           `json:"minutes_over_1mb"`
 	Cats            []apiCatShare `json:"cats"`
 	RecentSites     []string      `json:"recent_sites"`
-	EncryptedDNS    bool          `json:"encrypted_dns"`
-	LastTLS         *time.Time    `json:"last_tls,omitempty"`
-	LastDNS         *time.Time    `json:"last_dns,omitempty"`
-	Verdict         apiVerdict    `json:"verdict"`
+	// RecentServices is the same window read as services rather than raw SNIs:
+	// one entry per distinct service, newest first.
+	RecentServices []apiServiceHit `json:"recent_services"`
+	EncryptedDNS   bool            `json:"encrypted_dns"`
+	LastTLS        *time.Time      `json:"last_tls,omitempty"`
+	LastDNS        *time.Time      `json:"last_dns,omitempty"`
+	Verdict        apiVerdict      `json:"verdict"`
 }
 
 // handleSnapshot is the fast path behind the Срез drawer: it reads only the
@@ -1371,7 +1460,7 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		logRateLimited("rollup", "wgflow web: rollup read: %v", dbErr)
 	}
 	dbOK := dbErr == nil
-	sites, lastTLS, encDNS, scanErr := s.recentSitesByClientContext(r.Context(), cutoff, snapshotSitesPerClient)
+	sites, services, lastTLS, encDNS, sdkHits, scanErr := s.recentSitesByClientContext(r.Context(), cutoff, snapshotSitesPerClient)
 	if scanErr != nil {
 		return
 	}
@@ -1402,13 +1491,14 @@ func (s *webServer) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		total := sc.down + sc.up
 		v := unknownVerdict()
 		if dbOK {
-			v = classify(sc.series, startMinute, total, cats, devKind, lastTLS[name], lastDNS[name], now, loggerOK)
+			v = classify(sc.series, startMinute, total, cats, sdkHits[name], devKind, lastTLS[name], lastDNS[name], now, loggerOK)
 		}
 		entry := apiSnapshotClient{
 			Name: name, Person: s.aliases.Person(name), DeviceKind: devKind,
 			Down: sc.down, Up: sc.up, Total: total,
 			MinutesOver100K: sc.minOver100k, MinutesOver1MB: sc.minOver1mb,
-			Cats: cats, RecentSites: sites[name], EncryptedDNS: encDNS[name], Verdict: v,
+			Cats: cats, RecentSites: sites[name], RecentServices: services[name],
+			EncryptedDNS: encDNS[name], Verdict: v,
 		}
 		if t := lastTLS[name]; !t.IsZero() {
 			entry.LastTLS = &t
@@ -1524,23 +1614,40 @@ func tlsRecordSuggestsEncryptedDNS(rec TLSRecord) bool {
 	return encryptedDNSNames[strings.ToLower(rec.ServerName)] || rec.RemotePort == 853
 }
 
-// recentSitesByClient collects up to limit distinct recent SNIs per client
-// (newest first) plus the last TLS time, from one tls.jsonl tail scan. The
-// same walk also flags clients with encrypted-DNS evidence in the window
-// (known DoH/DoT SNI or port 853) — deliberately piggybacked here so the
-// board/snapshot endpoints get the signal without a second file scan. Flows
-// to port 853 without a captured handshake are covered on the client-detail
-// endpoint, which already loads per-target flows.
-func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string][]string, map[string]time.Time, map[string]bool) {
-	sites, last, encDNS, _ := s.recentSitesByClientContext(context.Background(), cutoff, limit)
-	return sites, last, encDNS
+// apiServiceHit is one distinct service behind a client's recent SNIs: the
+// hostname that produced it plus the read-time service/role labels, so the
+// board and the Срез can say "Picsart" where the raw SNI said
+// "upload.picsart.com" — and say "AppLovin · ads" instead of pretending an ad
+// host is a destination. Labels are read-time: they change with the rules, the
+// host never does.
+type apiServiceHit struct {
+	Host    string `json:"host"`
+	Service string `json:"service"`
+	Role    string `json:"role,omitempty"`
 }
 
-func (s *webServer) recentSitesByClientContext(ctx context.Context, cutoff time.Time, limit int) (map[string][]string, map[string]time.Time, map[string]bool, error) {
+// recentSitesByClient collects up to limit distinct recent SNIs per client
+// (newest first) plus the last TLS time, from one tls.jsonl tail scan. The
+// same walk also returns the distinct services behind those SNIs, flags
+// clients with encrypted-DNS evidence in the window (known DoH/DoT SNI or port
+// 853), and counts distinct ad/telemetry SDK hosts — all deliberately
+// piggybacked here so the board/snapshot endpoints get the signals without a
+// second file scan. Flows to port 853 without a captured handshake are covered
+// on the client-detail endpoint, which already loads per-target flows.
+func (s *webServer) recentSitesByClient(cutoff time.Time, limit int) (map[string][]string, map[string][]apiServiceHit, map[string]time.Time, map[string]bool, map[string]int) {
+	sites, services, last, encDNS, sdk, _ := s.recentSitesByClientContext(context.Background(), cutoff, limit)
+	return sites, services, last, encDNS, sdk
+}
+
+func (s *webServer) recentSitesByClientContext(ctx context.Context, cutoff time.Time, limit int) (map[string][]string, map[string][]apiServiceHit, map[string]time.Time, map[string]bool, map[string]int, error) {
 	sites := map[string][]string{}
 	seen := map[string]map[string]bool{}
+	services := map[string][]apiServiceHit{}
+	seenService := map[string]map[string]bool{}
 	last := map[string]time.Time{}
 	encDNS := map[string]bool{}
+	sdk := map[string]int{}
+	seenSDK := map[string]map[string]bool{}
 	err := scanLogReverseContext(ctx, filepath.Join(s.logDir, "tls.jsonl"), func(line []byte) bool {
 		var rec TLSRecord
 		if json.Unmarshal(line, &rec) != nil {
@@ -1558,6 +1665,29 @@ func (s *webServer) recentSitesByClientContext(ctx context.Context, cutoff time.
 		if rec.ServerName == "" {
 			return true
 		}
+		role := targetRole(rec.ServerName)
+		// The SDK count is over the whole window, not just the first `limit`
+		// names: it feeds the verdict, where "how many distinct ad hosts" is
+		// the signal itself.
+		if isSDKRole(role) {
+			host := normalizeHost(rec.ServerName)
+			if seenSDK[rec.Client] == nil {
+				seenSDK[rec.Client] = map[string]bool{}
+			}
+			if !seenSDK[rec.Client][host] {
+				seenSDK[rec.Client][host] = true
+				sdk[rec.Client]++
+			}
+		}
+		if svc := targetService(rec.ServerName); svc != "" && len(services[rec.Client]) < limit {
+			if seenService[rec.Client] == nil {
+				seenService[rec.Client] = map[string]bool{}
+			}
+			if !seenService[rec.Client][svc] {
+				seenService[rec.Client][svc] = true
+				services[rec.Client] = append(services[rec.Client], apiServiceHit{Host: rec.ServerName, Service: svc, Role: role})
+			}
+		}
 		if seen[rec.Client] == nil {
 			seen[rec.Client] = map[string]bool{}
 		}
@@ -1568,22 +1698,38 @@ func (s *webServer) recentSitesByClientContext(ctx context.Context, cutoff time.
 		sites[rec.Client] = append(sites[rec.Client], rec.ServerName)
 		return true
 	})
-	return sites, last, encDNS, err
+	return sites, services, last, encDNS, sdk, err
+}
+
+// currentService picks the newest service a client talked to that is not an ad
+// or telemetry SDK — the closest thing to "what app was this" the tail scan
+// can honestly offer. Empty when every recent name was an SDK (or none were
+// captured): better blank than naming an ad network as the activity.
+func currentService(hits []apiServiceHit) (string, string) {
+	for _, h := range hits {
+		if !isSDKRole(h.Role) {
+			return h.Service, h.Role
+		}
+	}
+	return "", ""
 }
 
 // lastSitesByClient returns, per client, the most recent SNI plus its timestamp
 // (the timestamp feeds the classifier's "fresh TLS" signal — nearly free since
-// the file is walked anyway) and the encrypted-DNS flag from the same walk. It
-// is the limit=1 case of recentSitesByClient.
-func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[string]time.Time, map[string]bool) {
-	res, last, encDNS, _ := s.lastSitesByClientContext(context.Background(), cutoff)
-	return res, last, encDNS
+// the file is walked anyway), the services behind the recent names, the
+// encrypted-DNS flag and the SDK-host count, all from the same walk. The
+// current site is still the single newest SNI; the scan keeps a few more names
+// (boardServicesPerClient) only so currentService has something to skip past
+// when an ad SDK happened to speak last.
+func (s *webServer) lastSitesByClient(cutoff time.Time) (map[string]string, map[string][]apiServiceHit, map[string]time.Time, map[string]bool, map[string]int) {
+	res, services, last, encDNS, sdk, _ := s.lastSitesByClientContext(context.Background(), cutoff)
+	return res, services, last, encDNS, sdk
 }
 
-func (s *webServer) lastSitesByClientContext(ctx context.Context, cutoff time.Time) (map[string]string, map[string]time.Time, map[string]bool, error) {
-	sites, last, encDNS, err := s.recentSitesByClientContext(ctx, cutoff, 1)
+func (s *webServer) lastSitesByClientContext(ctx context.Context, cutoff time.Time) (map[string]string, map[string][]apiServiceHit, map[string]time.Time, map[string]bool, map[string]int, error) {
+	sites, services, last, encDNS, sdk, err := s.recentSitesByClientContext(ctx, cutoff, boardServicesPerClient)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, nil, err
 	}
 	res := make(map[string]string, len(sites))
 	for name, list := range sites {
@@ -1591,7 +1737,7 @@ func (s *webServer) lastSitesByClientContext(ctx context.Context, cutoff time.Ti
 			res[name] = list[0]
 		}
 	}
-	return res, last, encDNS, nil
+	return res, services, last, encDNS, sdk, nil
 }
 
 // lastDNSByClient reverse-scans dns.jsonl within the window for each client's
@@ -1706,6 +1852,71 @@ type apiHour struct {
 	Total uint64            `json:"total"`
 }
 
+// foldSDKRows collapses ad/telemetry SDK rows into one synthetic row so a
+// single ad-supported app cannot push everything the person actually used out
+// of the top-targets table — a free photo editor can open two dozen SDK hosts,
+// and before folding those 24 rows were the answer to "what were they doing".
+//
+// It must run AFTER the totals/categories loop (the verdict and the donut keep
+// un-folded numbers) and BEFORE the detailTopTargets truncation (the 21st ad
+// row must reach the sum, and the real targets it displaced must come back).
+// The folded row keeps its place in the sorted list by its summed total.
+// Fewer than sdkFoldMinRows SDK rows are left exactly as they are.
+func foldSDKRows(rows []apiFlow) []apiFlow {
+	members := 0
+	for _, f := range rows {
+		if isSDKRole(f.Role) {
+			members++
+		}
+	}
+	if members < sdkFoldMinRows {
+		return rows
+	}
+	folded := apiFlow{
+		Target:   sdkFoldTarget,
+		Service:  sdkFoldService,
+		Role:     roleAds,
+		Category: "ads",
+		Members:  members,
+	}
+	byService := map[string]uint64{}
+	order := make([]string, 0, members)
+	kept := make([]apiFlow, 0, len(rows)-members+1)
+	for _, f := range rows {
+		if !isSDKRole(f.Role) {
+			kept = append(kept, f)
+			continue
+		}
+		if folded.Client == "" {
+			folded.Client = f.Client
+		}
+		folded.Down += f.Down
+		folded.Up += f.Up
+		name := f.Service
+		if name == "" {
+			name = apiFlowDisplayTarget(f)
+		}
+		if _, seen := byService[name]; !seen {
+			order = append(order, name)
+		}
+		byService[name] += f.Total
+	}
+	folded.Total = folded.Down + folded.Up
+	folded.Direction = directionHint(folded.Up, folded.Down)
+	sort.SliceStable(order, func(i, j int) bool { return byService[order[i]] > byService[order[j]] })
+	if len(order) > sdkFoldMemberNames {
+		order = order[:sdkFoldMemberNames]
+	}
+	folded.MemberNames = order
+	// kept is still sorted by total desc: put the folded row where its own
+	// total belongs rather than at either end.
+	at := sort.Search(len(kept), func(i int) bool { return kept[i].Total < folded.Total })
+	kept = append(kept, apiFlow{})
+	copy(kept[at+1:], kept[at:])
+	kept[at] = folded
+	return kept
+}
+
 func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/api/clients/")
 	if rest == "" {
@@ -1715,6 +1926,10 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	name, sub, _ := strings.Cut(rest, "/")
 	if sub == "minute" {
 		s.handleClientMinute(w, r, name)
+		return
+	}
+	if sub == "timeline" {
+		s.handleClientTimeline(w, r, name)
 		return
 	}
 	from, to := detailWindowFromRequest(r, 15*time.Minute)
@@ -1778,14 +1993,23 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	var down, up uint64
 	cat := map[string]uint64{}
 	targets := make([]apiFlow, 0, len(aggList))
+	// Distinct SDK hosts in the window: the detail endpoint already has the
+	// per-target rows the board endpoints deliberately skip, so its SDK signal
+	// is counted here rather than from a second tls.jsonl walk. Counted before
+	// folding — folding is presentation, the verdict reads the real spread.
+	sdkHosts := map[string]bool{}
 	for _, a := range aggList {
 		f := newAPIFlowWithAttribution(a, attrs)
 		down += a.Down
 		up += a.Up
 		cat[f.Category] += f.Total
+		if isSDKRole(f.Role) {
+			sdkHosts[apiFlowDisplayTarget(f)] = true
+		}
 		targets = append(targets, f)
 	}
 	sort.Slice(targets, func(i, j int) bool { return targets[i].Total > targets[j].Total })
+	targets = foldSDKRows(targets)
 	if len(targets) > detailTopTargets {
 		targets = targets[:detailTopTargets]
 	}
@@ -1811,7 +2035,7 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	verdict := unknownVerdict()
 	if dbOK {
-		verdict = classify(series, from.Unix()/60, down+up, cats, devKind, lastTLS, lastDNS, to, loggerOK)
+		verdict = classify(series, from.Unix()/60, down+up, cats, len(sdkHosts), devKind, lastTLS, lastDNS, to, loggerOK)
 	}
 	// Encrypted-DNS evidence: flows to the DoT/DoQ port in the window (the
 	// per-target aggregates are already loaded here — the board endpoints only

@@ -28,3 +28,20 @@ device_kind:
 target_names:
   "18.244.100.10": server-18-244-100-10.fra60.r.cloudfront.net
   "203.0.113.": my-own-edge.example.net
+
+# Optional: override the read-time service/role table (see the "Service, role
+# and direction" section of the README). Keys are hostname suffixes — a key
+# matches the apex and every label beneath it, and the longest suffix wins.
+# Each entry may set:
+#   service:  the human label shown instead of the registrable domain
+#   role:     ads | telemetry | push | cdn | media | sync | proxy | dns
+#   category: the coarse category categorize() should pin for these hosts
+# An empty mapping ({}) removes a builtin entry. These labels are applied when
+# a page is rendered, so a change here re-labels retained history too.
+services:
+  "picsart.com":
+    service: Picsart
+  "ads.example.net":
+    role: ads
+    category: ads
+  "applovin.com": {}        # drop a builtin rule

@@ -63,3 +63,51 @@ func TestAliasConfigFallbacks(t *testing.T) {
 		}
 	}
 }
+
+func TestLoadAliasConfigInstallsServiceRules(t *testing.T) {
+	defer setServiceRuleOverrides(nil)
+	defer setTargetNameOverrides(nil)
+	path := filepath.Join(t.TempDir(), "clients.yaml")
+	cfg := `
+people:
+  - display: Diana
+    devices: [diana-iphone]
+services:
+  "picsart.com":
+    service: Picsart
+  "ads.example.net":
+    role: ads
+    category: ads
+  "applovin.com": {}
+`
+	if err := os.WriteFile(path, []byte(cfg), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadAliasConfig(path); err != nil {
+		t.Fatal(err)
+	}
+	if got := targetService("upload.picsart.com"); got != "Picsart" {
+		t.Errorf("configured label = %q, want Picsart", got)
+	}
+	if got := targetRole("track.ads.example.net"); got != roleAds {
+		t.Errorf("configured role = %q, want ads", got)
+	}
+	if got := targetRuleCategory("track.ads.example.net"); got != "ads" {
+		t.Errorf("configured category = %q, want ads", got)
+	}
+	if got := targetRole("ms.applovin.com"); got != "" {
+		t.Errorf("empty mapping must delete the builtin, got role %q", got)
+	}
+	// Builtins the file does not mention survive the merge.
+	if got := targetService("p61-content.icloud-content.com"); got != "iCloud" {
+		t.Errorf("untouched builtin = %q, want iCloud", got)
+	}
+
+	// A missing config restores pure defaults.
+	if _, err := loadAliasConfig(filepath.Join(t.TempDir(), "nope.yaml")); err != nil {
+		t.Fatal(err)
+	}
+	if got := targetRole("ms.applovin.com"); got != roleAds {
+		t.Errorf("missing config must restore builtins, got %q", got)
+	}
+}

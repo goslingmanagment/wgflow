@@ -358,6 +358,268 @@ func TestEncryptedDNSFlag(t *testing.T) {
 	}
 }
 
+// webTestFlows decodes the apiFlow rows of a detail/traffic response.
+type webTestFlowResp struct {
+	Total      uint64        `json:"total"`
+	Categories []apiCatShare `json:"categories"`
+	TopTargets []apiFlow     `json:"top_targets"`
+	Rows       []apiFlow     `json:"rows"`
+	Verdict    apiVerdict    `json:"verdict"`
+}
+
+func webTestGetJSON(t *testing.T, mux *http.ServeMux, path string, v any) {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET %s = %d (body=%s)", path, rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), v); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func webTestFindFlow(rows []apiFlow, target string) (apiFlow, bool) {
+	for _, f := range rows {
+		if f.Target == target {
+			return f, true
+		}
+	}
+	return apiFlow{}, false
+}
+
+func TestFlowRowsCarryServiceRoleAndDirection(t *testing.T) {
+	const MB = 1 << 20
+	base := time.Now().Add(-2 * time.Minute).Truncate(time.Minute)
+	rollupPath := webTestRollup(t, []FlowRecord{
+		// A photo upload behind a Cloudflare edge: the row must name the app,
+		// report the direction, and NOT read as "cloudflare".
+		{TSEnd: base, Client: "diana-iphone", RemoteIP: "104.29.153.158", RemotePort: 443, Proto: "tcp",
+			Domain: "upload.picsart.com", ClientUploadBytes: 4 * MB, ClientDownloadBytes: 300 << 10},
+		// One ad SDK host: a lone SDK row is never folded.
+		{TSEnd: base, Client: "diana-iphone", RemoteIP: "104.29.153.158", RemotePort: 443, Proto: "tcp",
+			Domain: "ms.applovin.com", ClientDownloadBytes: 50_000, ClientUploadBytes: 5_000},
+	})
+	srv := &webServer{logDir: t.TempDir(), rollupPath: rollupPath}
+	mux := webTestMux(srv)
+
+	var detail webTestFlowResp
+	webTestGetJSON(t, mux, "/api/clients/diana-iphone?since=15m", &detail)
+
+	picsart, ok := webTestFindFlow(detail.TopTargets, "upload.picsart.com")
+	if !ok {
+		t.Fatalf("top_targets missing upload.picsart.com: %+v", detail.TopTargets)
+	}
+	if picsart.Service != "picsart.com" || picsart.Role != "" {
+		t.Errorf("picsart service/role = %q/%q, want picsart.com/\"\"", picsart.Service, picsart.Role)
+	}
+	if picsart.Direction != "upload" {
+		t.Errorf("picsart direction = %q, want upload", picsart.Direction)
+	}
+	if picsart.Category != "other" {
+		t.Errorf("picsart category = %q, want other (the Cloudflare edge is the road, not the destination)", picsart.Category)
+	}
+
+	applovin, ok := webTestFindFlow(detail.TopTargets, "ms.applovin.com")
+	if !ok {
+		t.Fatalf("top_targets missing ms.applovin.com: %+v", detail.TopTargets)
+	}
+	if applovin.Service != "AppLovin" || applovin.Role != roleAds {
+		t.Errorf("applovin service/role = %q/%q, want AppLovin/ads", applovin.Service, applovin.Role)
+	}
+	if applovin.Category != "ads" {
+		t.Errorf("applovin category = %q, want ads", applovin.Category)
+	}
+	if applovin.Members != 0 {
+		t.Errorf("a single SDK row must not be folded, got members=%d", applovin.Members)
+	}
+
+	// The same fields reach /api/traffic, which builds its rows from the same
+	// constructor.
+	var traffic webTestFlowResp
+	webTestGetJSON(t, mux, "/api/traffic?since=15m", &traffic)
+	row, ok := webTestFindFlow(traffic.Rows, "ms.applovin.com")
+	if !ok {
+		t.Fatalf("traffic rows missing ms.applovin.com: %+v", traffic.Rows)
+	}
+	if row.Service != "AppLovin" || row.Role != roleAds || row.Category != "ads" {
+		t.Errorf("traffic row = %+v, want AppLovin/ads/ads", row)
+	}
+}
+
+func TestClientDetailFoldsSDKRows(t *testing.T) {
+	base := time.Now().Add(-2 * time.Minute).Truncate(time.Minute)
+	// 25 distinct ad/telemetry SDK apexes — one app with an ad mediation stack
+	// easily opens this many, and unfolded they would be the whole table.
+	sdkDomains := []string{
+		"applovin.com", "vungle.com", "unityads.unity3d.com", "ironsrc.com", "chartboost.com",
+		"inmobi.com", "mintegral.com", "pangle.io", "adcolony.com", "moloco.com",
+		"liftoff.io", "fyber.com", "bidmachine.io", "smaato.net", "pubmatic.com",
+		"doubleclick.net", "googlesyndication.com", "googleadservices.com", "admob.com", "criteo.com",
+		"taboola.com", "outbrain.com", "adjust.com", "appsflyer.com", "branch.io",
+	}
+	// The real targets are deliberately the SMALLEST rows: unfolded they fall
+	// outside the 20-row cap, which is the whole reason folding is server-side.
+	realTargets := map[string]uint64{
+		"upload.picsart.com":   5_000,
+		"api.music.yandex.net": 4_000,
+		"www.wildberries.ru":   3_000,
+	}
+	var recs []FlowRecord
+	var sdkTotal uint64
+	for i, d := range sdkDomains {
+		bytes := uint64(100_000 + i*1_000)
+		sdkTotal += bytes
+		recs = append(recs, FlowRecord{
+			TSEnd: base, Client: "alice", RemoteIP: fmt.Sprintf("203.0.113.%d", i+1), RemotePort: 443,
+			Proto: "tcp", Domain: "sdk" + fmt.Sprint(i) + "." + d, ClientDownloadBytes: bytes,
+		})
+	}
+	var realTotal uint64
+	for host, bytes := range realTargets {
+		realTotal += bytes
+		recs = append(recs, FlowRecord{
+			TSEnd: base, Client: "alice", RemoteIP: "93.184.216.34", RemotePort: 443,
+			Proto: "tcp", Domain: host, ClientDownloadBytes: bytes,
+		})
+	}
+	srv := &webServer{logDir: t.TempDir(), rollupPath: webTestRollup(t, recs)}
+
+	var detail webTestFlowResp
+	webTestGetJSON(t, webTestMux(srv), "/api/clients/alice?since=15m", &detail)
+
+	folded, ok := webTestFindFlow(detail.TopTargets, sdkFoldTarget)
+	if !ok {
+		t.Fatalf("no folded row in top_targets: %+v", detail.TopTargets)
+	}
+	if folded.Members != len(sdkDomains) {
+		t.Errorf("folded members = %d, want %d", folded.Members, len(sdkDomains))
+	}
+	if folded.Total != sdkTotal || folded.Down != sdkTotal {
+		t.Errorf("folded total/down = %d/%d, want %d", folded.Total, folded.Down, sdkTotal)
+	}
+	if folded.Service != sdkFoldService || folded.Role != roleAds || folded.Category != "ads" {
+		t.Errorf("folded row = %+v, want %s/%s/ads", folded, sdkFoldService, roleAds)
+	}
+	if folded.Direction != "download" {
+		t.Errorf("folded direction = %q, want download", folded.Direction)
+	}
+	if len(folded.MemberNames) != sdkFoldMemberNames {
+		t.Errorf("member_names = %v, want %d names", folded.MemberNames, sdkFoldMemberNames)
+	}
+	if len(folded.MemberNames) > 0 && folded.MemberNames[0] != "Google Ads" {
+		// Names are ranked by summed bytes per SERVICE, so the three Google ad
+		// domains in the fixture outweigh any single larger row.
+		t.Errorf("member_names[0] = %q, want the biggest member (Google Ads)", folded.MemberNames[0])
+	}
+
+	// Exactly one folded row, and every real target survived the 20-row cap.
+	foldedRows := 0
+	for _, f := range detail.TopTargets {
+		if f.Members > 0 {
+			foldedRows++
+		}
+	}
+	if foldedRows != 1 {
+		t.Errorf("folded rows = %d, want exactly 1", foldedRows)
+	}
+	for host := range realTargets {
+		if _, ok := webTestFindFlow(detail.TopTargets, host); !ok {
+			t.Errorf("real target %s was lost to the row cap: %+v", host, detail.TopTargets)
+		}
+	}
+	if want := len(realTargets) + 1; len(detail.TopTargets) != want {
+		t.Errorf("top_targets = %d rows, want %d", len(detail.TopTargets), want)
+	}
+
+	// Folding is presentation only: the totals and the donut keep the real
+	// spread, and the verdict sees every distinct SDK host.
+	if want := sdkTotal + realTotal; detail.Total != want {
+		t.Errorf("total = %d, want %d", detail.Total, want)
+	}
+	cats := map[string]uint64{}
+	for _, c := range detail.Categories {
+		cats[c.Category] = c.Bytes
+	}
+	if cats["ads"] != sdkTotal {
+		t.Errorf("categories[ads] = %d, want the unfolded sum %d", cats["ads"], sdkTotal)
+	}
+	if cats["other"]+cats["yandex"]+cats["wildberries"] != realTotal {
+		t.Errorf("real categories = %v, want %d bytes in total", cats, realTotal)
+	}
+	if detail.Verdict.Evidence.SDKHits != len(sdkDomains) {
+		t.Errorf("detail sdk_hits = %d, want %d", detail.Verdict.Evidence.SDKHits, len(sdkDomains))
+	}
+}
+
+func TestBoardNamesServicesAndCountsSDKHosts(t *testing.T) {
+	now := time.Now()
+	base := now.Add(-2 * time.Minute).Truncate(time.Minute)
+	rollupPath := webTestRollup(t, []FlowRecord{
+		{TSEnd: base, Client: "alice", RemoteIP: "104.29.153.158", RemotePort: 443, Proto: "tcp",
+			Domain: "upload.picsart.com", ClientDownloadBytes: 150_000, ClientUploadBytes: 20_000},
+	})
+	logDir := t.TempDir()
+	// Oldest first in the file; the scan walks it backwards, so api.adjust.com
+	// is the newest name and picsart is the oldest.
+	webTestWriteJSONL(t, logDir, "tls.jsonl",
+		TLSRecord{TS: now.Add(-5 * time.Minute), Client: "alice", RemoteIP: "104.29.153.158", RemotePort: 443, ServerName: "upload.picsart.com"},
+		TLSRecord{TS: now.Add(-2 * time.Minute), Client: "alice", RemoteIP: "104.29.153.158", RemotePort: 443, ServerName: "ms.applovin.com"},
+		TLSRecord{TS: now.Add(-1 * time.Minute), Client: "alice", RemoteIP: "104.29.153.158", RemotePort: 443, ServerName: "api.adjust.com"},
+	)
+	srv := &webServer{logDir: logDir, rollupPath: rollupPath}
+	mux := webTestMux(srv)
+
+	var board struct {
+		Clients []apiClient `json:"clients"`
+	}
+	webTestGetJSON(t, mux, "/api/clients?since=15m", &board)
+	if len(board.Clients) != 1 {
+		t.Fatalf("board clients = %+v, want alice only", board.Clients)
+	}
+	alice := board.Clients[0]
+	if alice.CurrentSite != "api.adjust.com" {
+		t.Errorf("current_site = %q, want the newest SNI api.adjust.com", alice.CurrentSite)
+	}
+	// The newest name is a telemetry SDK; the board names the newest thing that
+	// is not one, because "Adjust" is not an answer to "what were they doing".
+	if alice.CurrentService != "picsart.com" || alice.CurrentRole != "" {
+		t.Errorf("current_service/role = %q/%q, want picsart.com/\"\"", alice.CurrentService, alice.CurrentRole)
+	}
+	if alice.Verdict == nil || alice.Verdict.Evidence.SDKHits != 2 {
+		t.Errorf("board sdk_hits = %+v, want 2 distinct SDK hosts", alice.Verdict)
+	}
+
+	var snap struct {
+		Clients []apiSnapshotClient `json:"clients"`
+	}
+	webTestGetJSON(t, mux, "/api/snapshot?since=15m", &snap)
+	if len(snap.Clients) != 1 {
+		t.Fatalf("snapshot clients = %+v", snap.Clients)
+	}
+	got := snap.Clients[0].RecentServices
+	want := []apiServiceHit{
+		{Host: "api.adjust.com", Service: "Adjust", Role: roleTelemetry},
+		{Host: "ms.applovin.com", Service: "AppLovin", Role: roleAds},
+		{Host: "upload.picsart.com", Service: "picsart.com"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("recent_services = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("recent_services[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if snap.Clients[0].Verdict.Evidence.SDKHits != 2 {
+		t.Errorf("snapshot sdk_hits = %d, want 2", snap.Clients[0].Verdict.Evidence.SDKHits)
+	}
+	// The raw SNI list is untouched by the service view.
+	if len(snap.Clients[0].RecentSites) != 3 || snap.Clients[0].RecentSites[0] != "api.adjust.com" {
+		t.Errorf("recent_sites = %v, want the three raw SNIs newest first", snap.Clients[0].RecentSites)
+	}
+}
+
 func TestDNSErrorsCountedAfterFilters(t *testing.T) {
 	logDir := t.TempDir()
 	now := time.Now()

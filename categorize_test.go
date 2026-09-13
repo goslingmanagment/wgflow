@@ -213,7 +213,19 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 	}{
 		{"edec822a8c68.j.cloudfront.hls.ttvnw.net", "", "twitch"}, // named twitch beats AWS fallback
 		{"cdn.discordapp.com", "", "discord"},
-		{"static.example", "104.29.153.158", "cloudflare"},
+		// A NAMED target never inherits the label of the network it crossed:
+		// the remote IP only speaks when there is no name at all.
+		{"static.example", "104.29.153.158", "other"},
+		{"104.29.153.158", "104.29.153.158", "cloudflare"},
+		{"upload.picsart.com", "104.29.153.158", "other"},
+		{"upload.picsart.com", "17.1.1.1", "other"},
+		// Ad/telemetry SDK rules outrank the brand switch.
+		{"ms.applovin.com", "", "ads"},
+		{"logs.ads.vungle.com", "", "ads"},
+		{"app-measurement.com", "", "ads"},
+		// ...but a rule with no pinned category leaves the switch in charge:
+		// APNs is still apple, the push role carries the nuance.
+		{"courier.push.apple.com", "", "apple"},
 		{"d111111abcdef8.cloudfront.net", "", "aws"},
 		{"telemetry-in.battle.net", "", "games"},
 		{"one.one.one.one", "1.1.1.1", "dns"},
