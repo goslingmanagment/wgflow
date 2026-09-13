@@ -26,6 +26,25 @@ The included `wgflow.service` runs:
 /usr/local/bin/wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db --flush 30s --rollup-retention 31d --rollup-detail-retention 7d
 ```
 
+One daemon can capture additional WireGuard interfaces, including an interface
+inside a Docker network namespace. Each extra source has its own peer config
+and VPN CIDRs but shares the same logs and rollup writer:
+
+```sh
+pid=$(docker inspect -f '{{.State.Pid}}' wg-easy)
+wgflow serve \
+  --iface wg0 \
+  --wg-config /etc/wireguard/wg0.conf \
+  --extra-source "name=wg-easy,iface=wg0,wg-config=/opt/wg-easy/etc-wireguard/wg0.conf,cidrs=10.8.0.0/24|fdcc:ad94:bacf:61a4::/64,netns=/proc/$pid/ns/net"
+```
+
+Opening a socket in another network namespace requires `CAP_SYS_ADMIN` during
+startup in addition to the capture service's existing `CAP_NET_RAW` and
+`CAP_NET_ADMIN`. A capability-sandboxed service that opens another process's
+`/proc/<pid>/ns/net` also needs `CAP_SYS_PTRACE`. The namespace path is
+monitored; if the container is recreated, `wgflow` exits so its service manager
+can restart it with the new container PID.
+
 Install example:
 
 ```sh

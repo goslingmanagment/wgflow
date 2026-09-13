@@ -218,6 +218,7 @@ const (
 // two parallel connections from the same client to the same server must not
 // share a reassembly buffer.
 type tcpFlowKey struct {
+	source     string
 	clientIP   string
 	remoteIP   string
 	clientPort uint16

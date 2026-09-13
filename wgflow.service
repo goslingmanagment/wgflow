@@ -1,27 +1,32 @@
 [Unit]
 Description=WireGuard flow and DNS logger
-After=network-online.target wg-quick@wg0.service
-Wants=network-online.target
+After=network-online.target wg-quick@wg0.service docker.service
+Wants=network-online.target docker.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db --flush 30s --rollup-retention 31d --rollup-detail-retention 7d
+RuntimeDirectory=wgflow
+RuntimeDirectoryMode=0755
+Environment=DOCKER_CONFIG=/run/wgflow
+ExecStartPre=/bin/sh -ec 'pid=$$(/usr/bin/docker inspect -f "{{.State.Pid}}" wg-easy); test "$$pid" -gt 0; ln -sfn "/proc/$$pid/ns/net" /run/wgflow/wg-easy-netns'
+ExecStart=/usr/local/bin/wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db --flush 30s --rollup-retention 31d --rollup-detail-retention 7d --extra-source name=wg-easy,iface=wg0,wg-config=/opt/wg-easy/etc-wireguard/wg0.conf,cidrs=10.8.0.0/24|fdcc:ad94:bacf:61a4::/64,netns=/run/wgflow/wg-easy-netns
 Restart=always
 RestartSec=3
 User=root
 NoNewPrivileges=true
-# Sandbox: the daemon only needs raw-socket capture (CAP_NET_RAW; CAP_NET_ADMIN
-# for SO_RCVBUFFORCE) plus write access to its log and rollup dirs. Everything
-# else — filesystem, kernel knobs, namespaces — is locked down.
-CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN
+# CAP_SYS_ADMIN enters wg-easy's network namespace; CAP_SYS_PTRACE permits
+# opening /proc/<container-pid>/ns/net under the service capability sandbox.
+# The daemon then captures both sources in one process so logs and the bbolt
+# rollup retain a single writer.
+CapabilityBoundingSet=CAP_NET_RAW CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE
 ProtectSystem=strict
-ReadWritePaths=/var/log/wgflow /var/lib/wgflow
+ReadWritePaths=/var/log/wgflow /var/lib/wgflow /run/wgflow
 ProtectHome=true
 PrivateTmp=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
-RestrictNamespaces=true
+RestrictNamespaces=false
 RestrictRealtime=true
 LockPersonality=true
 RestrictAddressFamilies=AF_PACKET AF_NETLINK AF_UNIX AF_INET AF_INET6

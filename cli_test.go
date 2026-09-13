@@ -93,6 +93,68 @@ AllowedIPs = 10.66.66.99/32
 	}
 }
 
+func TestClientMapLoadWGEasyComments(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "wg0.conf")
+	conf := `[Interface]
+Address = 10.8.0.1/24
+
+# Client: diana-iphone (3)
+[Peer]
+PublicKey = aaa
+AllowedIPs = 10.8.0.4/32, fdcc:ad94:bacf:61a4::cafe:4/128
+
+# Client: Diana MacBook (42)
+[Peer]
+PublicKey = bbb
+AllowedIPs = 10.8.0.5/32
+`
+	if err := os.WriteFile(path, []byte(conf), 0644); err != nil {
+		t.Fatal(err)
+	}
+	c := &ClientMap{}
+	if err := c.Load(path, []string{"10.8.0.0/24", "fdcc:ad94:bacf:61a4::/64"}); err != nil {
+		t.Fatal(err)
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if got := c.byIP["10.8.0.4"]; got != "diana-iphone" {
+		t.Fatalf("wg-easy iphone name = %q", got)
+	}
+	if got := c.byIP["fdcc:ad94:bacf:61a4::cafe:4"]; got != "diana-iphone" {
+		t.Fatalf("wg-easy iphone IPv6 name = %q", got)
+	}
+	if got := c.byIP["10.8.0.5"]; got != "Diana MacBook" {
+		t.Fatalf("wg-easy MacBook name = %q", got)
+	}
+}
+
+func TestParseExtraCaptureSource(t *testing.T) {
+	raw := "name=wg-easy,iface=wg0,wg-config=/opt/wg-easy/wg0.conf,cidrs=10.8.0.0/24|fdcc:ad94:bacf:61a4::/64,netns=/proc/123/ns/net"
+	got, err := parseExtraCaptureSource(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "wg-easy" || got.Iface != "wg0" || got.WGConfigPath != "/opt/wg-easy/wg0.conf" || got.NetNSPath != "/proc/123/ns/net" {
+		t.Fatalf("parsed source = %+v", got)
+	}
+	if len(got.VPNCIDRs) != 2 || got.VPNCIDRs[0] != "10.8.0.0/24" || got.VPNCIDRs[1] != "fdcc:ad94:bacf:61a4::/64" {
+		t.Fatalf("parsed cidrs = %v", got.VPNCIDRs)
+	}
+
+	bad := []string{
+		"",
+		"name=wg-easy,iface=wg0,wg-config=/x",
+		"name=wg-easy,iface=wg0,wg-config=/x,cidrs=bad",
+		"name=wg-easy,iface=wg0,wg-config=/x,cidrs=10.8.0.0/24,nope=x",
+		"name=wg-easy,name=again,iface=wg0,wg-config=/x,cidrs=10.8.0.0/24",
+	}
+	for _, raw := range bad {
+		if _, err := parseExtraCaptureSource(raw); err == nil {
+			t.Errorf("parseExtraCaptureSource(%q) succeeded, want error", raw)
+		}
+	}
+}
+
 func writeFlowLines(t *testing.T, path string, recs []FlowRecord, tail string) {
 	t.Helper()
 	f, err := os.Create(path)

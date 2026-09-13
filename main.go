@@ -63,7 +63,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, `wgflow
 
 Usage:
-  wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf --log-dir /var/log/wgflow
+  wgflow serve --iface wg0 --wg-config /etc/wireguard/wg0.conf [--extra-source name=NAME,iface=IFACE,wg-config=PATH,cidrs=CIDR|CIDR,netns=PATH]
   wgflow top --since 5m [--client maxim] [--log-dir /var/log/wgflow] [--limit 30]
   wgflow report --since 24h [--log-dir /var/log/wgflow]
   wgflow rollup-import --since 24h [--reset]

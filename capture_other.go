@@ -13,6 +13,10 @@ func openPacketSocket(iface string) (int, error) {
 	return -1, errors.New("wgflow serve (packet capture) is only supported on linux")
 }
 
+func openPacketSocketInNetNS(iface, netnsPath string) (int, error) {
+	return -1, errors.New("wgflow serve (packet capture) is only supported on linux")
+}
+
 func packetSocketStats(fd int) (uint64, uint64, error) {
 	return 0, 0, errors.New("packet socket stats are only supported on linux")
 }
