@@ -1,6 +1,6 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { fmtBytes, catColor, CAT_COLORS } from '../lib/format.js'
+  import { fmtBytes, catColor, CAT_COLORS, dirGlyph, dirTitle } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
   import { debounced } from '../lib/debounce.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
@@ -50,8 +50,8 @@
               <td class="app" title={appTitle(f)}><TargetCell row={f} kind="app" /></td>
               <td class="infra" title={infraTitle(f)}><TargetCell row={f} kind="infra" /></td>
               <td class="mono dim">{f.proto}:{f.port}</td>
-              <td class="r mono">{fmtBytes(f.down)}</td>
-              <td class="r mono">{fmtBytes(f.up)}</td>
+              <td class="r mono">{#if f.direction === 'download'}<span class="dir" title={dirTitle(f.direction)}>{dirGlyph(f.direction)}</span>{/if}{fmtBytes(f.down)}</td>
+              <td class="r mono">{#if f.direction === 'upload'}<span class="dir" title={dirTitle(f.direction)}>{dirGlyph(f.direction)}</span>{/if}{fmtBytes(f.up)}</td>
               <td class="r mono">{fmtBytes(f.total)}</td>
             </tr>
           {/each}
@@ -83,6 +83,8 @@
   td.app, td.infra { color: var(--color-text); white-space: normal; overflow: visible; }
   .dim { color: var(--color-muted); }
   .cd { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 6px; }
+  /* direction glyph: which way the bytes leaned — a hint, not a claim about what moved */
+  .dir { color: var(--color-muted); margin-right: 3px; cursor: help; }
   .err { color: var(--color-danger); }
   .pad { padding: 16px; }
   th:nth-child(1), td:nth-child(1) { width: 16%; }

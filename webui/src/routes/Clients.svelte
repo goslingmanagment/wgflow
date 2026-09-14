@@ -1,6 +1,6 @@
 <script>
   import { setGroup, trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { fmtBytes, fmtRate, sinceSeconds, catColor, verdictColor, deviceGlyph } from '../lib/format.js'
+  import { fmtBytes, fmtRate, sinceSeconds, catColor, verdictColor, deviceGlyph, roleLabel } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
   import { aggVerdict, personOf } from '../lib/verdict.js'
   import Mix from '../lib/Mix.svelte'
@@ -115,8 +115,10 @@
         <div class="tx">
           <div class="name">{#if deviceGlyph(c.device_kind)}<span class="dev" title={c.device_kind}>{deviceGlyph(c.device_kind)}</span>{/if}{c.name} <VerdictBadge verdict={c.verdict} loggerOk={data.logger_ok} compact />{#if c.encrypted_dns}
               <InfoTip text={EDNS_TIP}><span class="edns">DoH/DoT</span></InfoTip>{/if}</div>
-          <div class="site">
-            {#if c.current_site}<span class="cd" style="background:{catColor(c.top_category)}"></span>→ {c.current_site}{:else}<span class="muted">— {c.top_category || ''}</span>{/if}
+          <!-- «doing now»: the SERVICE label when the server has one, with the raw
+               host kept in the tooltip so the label can always be checked. -->
+          <div class="site" title={c.current_service && c.current_site ? 'последний след: ' + c.current_site : ''}>
+            {#if c.current_service || c.current_site}<span class="cd" style="background:{catColor(c.top_category)}"></span>→ {c.current_service || c.current_site}{#if roleLabel(c.current_role)}<span class="role" title="роль по имени хоста — вероятно {roleLabel(c.current_role)}">{roleLabel(c.current_role)}</span>{/if}{:else}<span class="muted">— {c.top_category || ''}</span>{/if}
           </div>
         </div>
       </div>
@@ -379,6 +381,17 @@
     height: 7px;
     border-radius: 2px;
     margin-right: 5px;
+  }
+  /* role chip: WHAT KIND of endpoint the newest trace was (push/cdn/ads/…) —
+     read-time and hedged, never a claim about what the person did. */
+  .site .role {
+    margin-left: 5px;
+    color: var(--color-muted);
+    background: var(--color-s3);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 9.5px;
+    cursor: help;
   }
   .muted {
     color: var(--color-muted);

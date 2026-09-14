@@ -74,12 +74,36 @@
     return v.status
   }
 
+  const SDK_ROLES = new Set(['ads', 'telemetry'])
+
   function deviceDoing(c, loggerOk) {
     if (c.total === 0) return statusWord(c.verdict, loggerOk)
-    const sites = (c.recent_sites || []).slice(0, 3)
     const cat = c.cats?.[0]?.category || ''
+    // Newer backends answer with services, not raw SNIs: name up to three real
+    // destinations and fold every ad/telemetry host into one "+ реклама" — a
+    // tail of AppLovin/Vungle hostnames told the reader nothing about the person.
+    const services = c.recent_services
+    if (Array.isArray(services) && services.length) {
+      const named = []
+      let sdk = false
+      for (const s of services) {
+        if (SDK_ROLES.has(s.role)) {
+          sdk = true
+          continue
+        }
+        const label = s.service || s.host
+        if (!label || named.includes(label)) continue
+        if (named.length < 3) named.push(label)
+      }
+      const parts = [cat, ...named]
+      if (sdk) parts.push('+ реклама')
+      // bytes, but nothing we could name — never invent a domain
+      if (!named.length && !sdk) parts.push('без имени (QUIC)')
+      return parts.filter(Boolean).join(' · ')
+    }
+    // Older backend (no recent_services): raw SNIs, as before.
+    const sites = (c.recent_sites || []).slice(0, 3)
     if (sites.length) return [cat, ...sites].filter(Boolean).join(' · ')
-    // bytes but no named domains — never invent one
     return [cat, 'без имени (QUIC)'].filter(Boolean).join(' · ')
   }
 

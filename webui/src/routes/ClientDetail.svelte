@@ -1,6 +1,6 @@
 <script>
   import { trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix } from '../lib/format.js'
+  import { fmtBytes, fmtRate, sinceSeconds, catColor, ago, dnsRcodeName, hhmmMSK, deviceGlyph, mskAnchorUnix, roleLabel, dirGlyph, dirTitle } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
   import InfoTip from '../lib/InfoTip.svelte'
@@ -9,6 +9,7 @@
   import DayTimeline from '../lib/DayTimeline.svelte'
   import VerdictBadge from '../lib/VerdictBadge.svelte'
   import Ribbon from '../lib/Ribbon.svelte'
+  import Activity from '../lib/Activity.svelte'
 
   // "last real-use trace" (last >100KB minute), falling back to last-any (last
   // ping). Never "проснулась" — only a trace, always MSK.
@@ -21,32 +22,69 @@
     return 'нет заметных следов в окне'
   }
 
+  // The server folds every ad/telemetry row of a client into one synthetic row
+  // (target "sdk"). It is a CLASS of chatter, not a destination, so it gets its
+  // own label and the member hosts as evidence instead of a fake hostname.
+  const SDK_TARGET = 'sdk'
+  // Roles whose traffic is background by construction (a push socket, a sync
+  // job, a resolver, an asset edge). Rendering them dimmer is a reading aid,
+  // NOT a verdict: a dim row can still be a person actively using an app.
+  const BACKGROUND_ROLES = new Set(['push', 'sync', 'dns', 'cdn'])
+
   // Collapse a top-target's app-identity and infrastructure layers into one cell:
-  // a primary identity (app hostname, or the bare IP when that's all we have) over
-  // a dim infra/provenance subline. Replaces the old two-column App|Infra split,
-  // which needed more width than the half-page card has and so overflowed/truncated.
+  // a primary identity (the service label when we have one, else the app hostname,
+  // else the bare IP) over a dim host/infra/provenance subline. Replaces the old
+  // two-column App|Infra split, which needed more width than the half-page card
+  // has and so overflowed/truncated.
   function targetView(t) {
-    const ident = t.app_target || t.target
-    const identIsIP = !t.app_target && t.is_ip
-    let infra = ''
+    if (t.target === SDK_TARGET) {
+      const names = (t.member_names || []).join(', ')
+      const hosts = `${t.members || 0} хостов`
+      return {
+        ident: 'Реклама и аналитика',
+        identIsIP: false,
+        infra: names ? `${hosts} · ${names}` : hosts,
+        prov: '',
+        provTitle: '',
+        role: '',
+        background: false,
+        title: `свёрнуто ${hosts} рекламы/аналитики${names ? ': ' + names : ''}`,
+      }
+    }
+    const host = t.app_target || t.target
+    // service is a read-time label and is never invented for a bare IP, so a
+    // nameless target still falls through to the IP itself.
+    const ident = t.service || host
+    const identIsIP = !t.service && !t.app_target && t.is_ip
+    const parts = []
+    // Show the host under the service label only when the label hides it.
+    if (t.service && host && host !== t.service && !identIsIP) parts.push(host)
     let prov = ''
     let provTitle = ''
     if (!t.is_ip) {
-      infra = 'direct'
+      parts.push('direct')
     } else {
-      const parts = []
       if (t.target_org) parts.push(t.target_org)
       if (t.app_target) parts.push(t.target) // app served from this IP — show where
       else if (t.resolved_target) parts.push(t.resolved_target)
       else parts.push(t.proto === 'udp' ? 'QUIC' : 'no PTR')
-      infra = parts.join(' · ')
       if (t.attribution_source) {
         const more = t.attribution_candidates?.length > 1 ? ' +' + (t.attribution_candidates.length - 1) : ''
         prov = t.attribution_source.replace(/^TLS /, '') + more
         provTitle = t.attribution_source + (more ? ' · ' + t.attribution_candidates.join(', ') : '')
       }
     }
-    return { ident, identIsIP, infra, prov, provTitle, title: infra ? `${ident} · ${infra}` : ident }
+    const infra = parts.join(' · ')
+    return {
+      ident,
+      identIsIP,
+      infra,
+      prov,
+      provTitle,
+      role: roleLabel(t.role),
+      background: BACKGROUND_ROLES.has(t.role),
+      title: infra ? `${ident} · ${infra}` : ident,
+    }
   }
 
   let { param } = $props()
@@ -147,6 +185,9 @@
     </div>
   {/if}
 
+  <!-- The headline read: what this window was ABOUT, before the byte tables. -->
+  <Activity name={data.name} from={fromAnchor} since={ui.since} />
+
   <div class="two">
     <div class="card">
       <div class="ch"><h3 class="serif">Top targets</h3><span class="hint mono" title="Wire bytes are ~94–95% of these totals; packet counts are approximate (GSO/GRO coalescing).">~94–95% (GSO/GRO)</span></div>
@@ -156,17 +197,20 @@
           <tbody>
             {#each targets.slice(0, 8) as t}
               {@const v = targetView(t)}
-              <tr class:bg={t.category === 'apple'}>
+              <tr class:bg={t.category === 'apple' || v.background}>
                 <td class="tgt" title={v.title}>
                   <div class="ident" class:mono={v.identIsIP}>
                     <span class="name">{v.ident}</span>
                     {#if v.prov}<span class="prov" title={v.provTitle}>{v.prov}</span>{/if}
                   </div>
-                  {#if v.infra}<div class="infra">{v.infra}</div>{/if}
+                  <div class="infra">
+                    {#if v.role}<span class="role" title="роль по имени хоста — вероятно {v.role}; это про тип адресата, не про действие человека">{v.role}</span>{/if}
+                    {#if v.infra}<span class="ih">{v.infra}</span>{/if}
+                  </div>
                 </td>
                 <td class="cat"><span class="cd" style="background:{catColor(t.category)}"></span>{t.category}{#if t.category === 'apple'}<InfoTip text="Apple endpoints are usually background — push, OCSP, iCloud. Inferred from the IP range, not proven."><span class="hedge">?</span></InfoTip>{/if}</td>
-                <td class="r mono">{fmtBytes(t.down)}</td>
-                <td class="r mono">{fmtBytes(t.up)}</td>
+                <td class="r mono">{#if t.direction === 'download'}<span class="dir" title={dirTitle(t.direction)}>{dirGlyph(t.direction)}</span>{/if}{fmtBytes(t.down)}</td>
+                <td class="r mono">{#if t.direction === 'upload'}<span class="dir" title={dirTitle(t.direction)}>{dirGlyph(t.direction)}</span>{/if}{fmtBytes(t.up)}</td>
               </tr>
             {/each}
             {#if targets.length === 0}<tr><td colspan="4" class="empty">No traffic in this window.</td></tr>{/if}
@@ -349,12 +393,36 @@
     text-transform: uppercase;
   }
   .infra {
+    display: flex;
+    align-items: center;
+    gap: 5px;
     margin-top: 2px;
+    min-width: 0;
+    color: var(--color-muted);
+    font-size: 10.5px;
+  }
+  .infra .ih {
+    min-width: 0;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* role chip: WHAT KIND of endpoint (push/cdn/ads/…), read-time and hedged —
+     never a claim about what the person did. */
+  .role {
+    flex: 0 0 auto;
+    color: var(--color-dim);
+    background: var(--color-s3);
+    border-radius: 4px;
+    padding: 0 5px;
+    font-size: 9.5px;
+    cursor: help;
+  }
+  /* direction glyph: which way the bytes leaned, a hint, not a claim */
+  .dir {
     color: var(--color-muted);
-    font-size: 10.5px;
+    margin-right: 3px;
+    cursor: help;
   }
   .hedge {
     margin-left: 5px;
@@ -368,6 +436,9 @@
   tr.bg .tgt .name,
   tr.bg .tgt .infra {
     color: var(--color-dim);
+  }
+  tr.bg .tgt .name {
+    opacity: 0.8;
   }
   .card {
     background: var(--color-s1);
@@ -427,8 +498,10 @@
   .t th.c-cat {
     width: 88px;
   }
+  /* wide enough for "1.23 MiB" PLUS the direction glyph — at 82px the arrow
+     pushed the byte figure into an ellipsis. */
   .t th.c-num {
-    width: 82px;
+    width: 94px;
   }
   .t td {
     padding: 6px 6px 6px 0;

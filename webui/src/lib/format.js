@@ -188,10 +188,65 @@ export const CAT_COLORS = {
   spotify: '#1db954',
   microsoft: '#17a2b8',
   cdn: '#8a7f6b',
+  // ads: ad/telemetry SDK chatter (the folded «Реклама и аналитика» class).
+  // Orchid — deliberately far from meta indigo (#7f77dd), proxy grey-violet
+  // (#8d86a5), wildberries pink (#d4537e) and yandex crimson (#e5263b), so a
+  // Mix/Donut slice of ad traffic can't be mistaken for any of them.
+  ads: '#c678dd',
+  // ai: mint-teal. Deliberately LIGHTER than telegram (#1baf7a) and bytedance
+  // (#00b3a4) and greener than the dns cyan (#56b6c2) — the green/teal band is
+  // crowded, so this one is separated by lightness as well as hue.
+  ai: '#2fd4a8',
+  // dev: muted steel grey-blue — package registries and git are background
+  // infrastructure, so the hue is deliberately quiet; sits between vk's
+  // saturated blue (#4a76a8) and the neutral `other` grey.
+  dev: '#7d93a8',
+  // work: the agency's own tools. Burnt coral — the brand family, dimmed, so it
+  // reads as "ours" without stealing the coral accent (#e06a3f) the verdict
+  // engine owns.
+  work: '#b4633f',
+  // twitter/X: near-white with a blue cast, matching the brand's monochrome.
+  twitter: '#d9e6f2',
+  // pinterest: magenta-pink. NOT the brand's own red (#e60023) — that would sit
+  // on top of fansly (#f85149) and netflix (#c0392b); pushed to a free hue away
+  // from wildberries' rose (#d4537e) too.
+  pinterest: '#ef4fb0',
   other: '#6b7785',
 }
 export function catColor(c) {
   return CAT_COLORS[c] || '#6b7785'
+}
+
+// Role labels: WHAT KIND of endpoint a service is (service.go's role axis), not
+// what a person did. Rendered as a small chip beside the service name so
+// "picsart.com" and "Apple Push" never read as the same kind of evidence.
+export const ROLE_LABELS = {
+  ads: 'реклама',
+  telemetry: 'аналитика',
+  push: 'push',
+  cdn: 'cdn',
+  media: 'медиа',
+  sync: 'синхронизация',
+  proxy: 'прокси',
+  dns: 'dns',
+}
+export function roleLabel(r) {
+  return ROLE_LABELS[r] || ''
+}
+
+// Direction glyph for the byte-skew hint. A hint about which way the bytes went,
+// never a claim about what was transferred — the server leaves it empty for
+// balanced or too-small flows, and so do we.
+export function dirGlyph(d) {
+  return d === 'upload' ? '↑' : d === 'download' ? '↓' : ''
+}
+
+export const DIR_TITLES = {
+  upload: 'в основном отдача',
+  download: 'в основном приём',
+}
+export function dirTitle(d) {
+  return DIR_TITLES[d] || ''
 }
 
 // Verdict status -> dot color. active = the coral active/brand hue; likely-bg =
