@@ -338,3 +338,42 @@ func TestTimelineReportsDBOutageInsteadOfSilence(t *testing.T) {
 		t.Errorf("minutes/sessions = %s / %s, want [] / [] (the window was in range)", raw.Minutes, raw.Sessions)
 	}
 }
+
+// A handshake at :02:40 is flushed into the :03 rollup row (30 s cadence,
+// bucketed on ts_end): the service must still read as new in :03.
+func TestTimelineNewSurvivesFlushMinuteSkew(t *testing.T) {
+	base := time.Now().Truncate(time.Minute).Add(-20 * time.Minute)
+	srv := timelineTestServer(t, []FlowRecord{
+		{TSEnd: base.Add(3 * time.Minute), Client: "alice", RemoteIP: "93.184.216.35", RemotePort: 443,
+			Proto: "tcp", Domain: "www.newsite.com", ClientDownloadBytes: 500_000},
+		{TSEnd: base.Add(3*time.Minute + 30*time.Second), Client: "alice", RemoteIP: "93.184.216.35", RemotePort: 443,
+			Proto: "tcp", Domain: "www.newsite.com", ClientDownloadBytes: 500_000},
+		{TSEnd: base.Add(4 * time.Minute), Client: "alice", RemoteIP: "93.184.216.35", RemotePort: 443,
+			Proto: "tcp", Domain: "www.newsite.com", ClientDownloadBytes: 500_000},
+	})
+	webTestWriteJSONL(t, srv.logDir, "tls.jsonl",
+		TLSRecord{TS: base.Add(2*time.Minute + 40*time.Second), Client: "alice", RemoteIP: "93.184.216.35", RemotePort: 443, ServerName: "www.newsite.com", Protocol: "tls"},
+	)
+	tl := timelineGet(t, srv, "alice", "?since=30m")
+	fresh, ok := timelineServiceIn(timelineMinuteAt(t, tl, base.Add(3*time.Minute)).Services, "newsite.com")
+	if !ok || !fresh.New {
+		t.Fatalf("newsite.com should be new in the first row-bearing minute after its handshake: ok=%v row=%+v", ok, fresh)
+	}
+	later, _ := timelineServiceIn(timelineMinuteAt(t, tl, base.Add(4*time.Minute)).Services, "newsite.com")
+	if later.New {
+		t.Error("new must be marked once, not on every later minute")
+	}
+	if len(tl.Sessions) != 1 || len(tl.Sessions[0].NewServices) != 1 || tl.Sessions[0].NewServices[0] != "newsite.com" {
+		t.Errorf("sessions = %+v, want one session with new_services [newsite.com]", tl.Sessions)
+	}
+}
+
+// The advertised 6-hour cap must be reachable by the natural request.
+func TestTimelineSixHourWindowRenders(t *testing.T) {
+	srv := timelineTestServer(t, []FlowRecord{{TSEnd: time.Now().Truncate(time.Minute).Add(-time.Minute), Client: "bob",
+		RemoteIP: "93.184.216.34", RemotePort: 443, Proto: "tcp", Domain: "example.com", ClientDownloadBytes: 1000}})
+	tl := timelineGet(t, srv, "alice", "?since=6h")
+	if tl.Minutes == nil || tl.Sessions == nil || tl.Note != "" {
+		t.Fatalf("since=6h must render (empty lists, no note); got minutes=%v sessions=%v note=%q", tl.Minutes == nil, tl.Sessions == nil, tl.Note)
+	}
+}

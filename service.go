@@ -121,76 +121,76 @@ var builtinServiceRules = map[string]serviceRule{
 	"analytics.tiktok.com":                 {Service: "TikTok Analytics", Role: roleTelemetry, Category: "ads"},
 	"business-api.tiktok.com":              {Service: "TikTok Analytics", Role: roleTelemetry, Category: "ads"},
 	// Push transports.
-	"push.apple.com":            {Service: "Apple Push", Role: rolePush},
-	"mtalk.google.com":          {Service: "Google Push (FCM)", Role: rolePush},
-	"fcm.googleapis.com":        {Service: "Google Push (FCM)", Role: rolePush},
+	"push.apple.com":            {Service: "Apple Push", Role: rolePush, Category: "apple"},
+	"mtalk.google.com":          {Service: "Google Push (FCM)", Role: rolePush, Category: "google"},
+	"fcm.googleapis.com":        {Service: "Google Push (FCM)", Role: rolePush, Category: "google"},
 	"push.services.mozilla.com": {Service: "Mozilla Push", Role: rolePush},
-	"notify.windows.com":        {Service: "Windows Push", Role: rolePush},
-	"wns.windows.com":           {Service: "Windows Push", Role: rolePush},
+	"notify.windows.com":        {Service: "Windows Push", Role: rolePush, Category: "microsoft"},
+	"wns.windows.com":           {Service: "Windows Push", Role: rolePush, Category: "microsoft"},
 	// Streaming payload hosts.
-	"googlevideo.com":  {Service: "YouTube", Role: roleMedia},
-	"nflxvideo.net":    {Service: "Netflix", Role: roleMedia},
-	"ttvnw.net":        {Service: "Twitch", Role: roleMedia},
-	"tiktokcdn.com":    {Service: "TikTok", Role: roleMedia},
-	"tiktokcdn-us.com": {Service: "TikTok", Role: roleMedia},
-	"scdn.co":          {Service: "Spotify", Role: roleMedia},
-	"strm.yandex.net":  {Service: "Yandex Music/Video", Role: roleMedia},
-	"vkuservideo.net":  {Service: "VK Video", Role: roleMedia},
-	"vkuseraudio.net":  {Service: "VK Music", Role: roleMedia},
+	"googlevideo.com":  {Service: "YouTube", Role: roleMedia, Category: "google"},
+	"nflxvideo.net":    {Service: "Netflix", Role: roleMedia, Category: "netflix"},
+	"ttvnw.net":        {Service: "Twitch", Role: roleMedia, Category: "twitch"},
+	"tiktokcdn.com":    {Service: "TikTok", Role: roleMedia, Category: "bytedance"},
+	"tiktokcdn-us.com": {Service: "TikTok", Role: roleMedia, Category: "bytedance"},
+	"scdn.co":          {Service: "Spotify", Role: roleMedia, Category: "spotify"},
+	"strm.yandex.net":  {Service: "Yandex Music/Video", Role: roleMedia, Category: "yandex"},
+	"vkuservideo.net":  {Service: "VK Video", Role: roleMedia, Category: "vk"},
+	"vkuseraudio.net":  {Service: "VK Music", Role: roleMedia, Category: "vk"},
 	// Static edges of known brands.
-	"fbcdn.net":             {Service: "Instagram/Facebook", Role: roleCDN},
-	"cdninstagram.com":      {Service: "Instagram", Role: roleCDN},
-	"ytimg.com":             {Service: "YouTube", Role: roleCDN},
-	"mzstatic.com":          {Service: "Apple", Role: roleCDN},
-	"gstatic.com":           {Service: "Google", Role: roleCDN},
-	"googleusercontent.com": {Service: "Google", Role: roleCDN},
-	"yastatic.net":          {Service: "Yandex", Role: roleCDN},
-	"userapi.com":           {Service: "VK", Role: roleCDN},
-	"akamaized.net":         {Service: "Akamai", Role: roleCDN},
-	"akamaihd.net":          {Service: "Akamai", Role: roleCDN},
-	"cloudfront.net":        {Service: "CloudFront", Role: roleCDN},
+	"fbcdn.net":             {Service: "Instagram/Facebook", Role: roleCDN, Category: "meta"},
+	"cdninstagram.com":      {Service: "Instagram", Role: roleCDN, Category: "meta"},
+	"ytimg.com":             {Service: "YouTube", Role: roleCDN, Category: "google"},
+	"mzstatic.com":          {Service: "Apple", Role: roleCDN, Category: "apple"},
+	"gstatic.com":           {Service: "Google", Role: roleCDN, Category: "google"},
+	"googleusercontent.com": {Service: "Google", Role: roleCDN, Category: "google"},
+	"yastatic.net":          {Service: "Yandex", Role: roleCDN, Category: "yandex"},
+	"userapi.com":           {Service: "VK", Role: roleCDN, Category: "vk"},
+	"akamaized.net":         {Service: "Akamai", Role: roleCDN, Category: "cdn"},
+	"akamaihd.net":          {Service: "Akamai", Role: roleCDN, Category: "cdn"},
+	"cloudfront.net":        {Service: "CloudFront", Role: roleCDN, Category: "aws"},
 	// Cloud sync / backup.
-	"icloud-content.com":     {Service: "iCloud", Role: roleSync},
-	"icloud.com":             {Service: "iCloud"},
-	"storage.yandex.net":     {Service: "Yandex Disk", Role: roleSync},
-	"disk.yandex.ru":         {Service: "Yandex Disk", Role: roleSync},
+	"icloud-content.com":     {Service: "iCloud", Role: roleSync, Category: "apple"},
+	"icloud.com":             {Service: "iCloud", Category: "apple"},
+	"storage.yandex.net":     {Service: "Yandex Disk", Role: roleSync, Category: "yandex"},
+	"disk.yandex.ru":         {Service: "Yandex Disk", Role: roleSync, Category: "yandex"},
 	"dropbox.com":            {Service: "Dropbox", Role: roleSync},
 	"dropboxusercontent.com": {Service: "Dropbox", Role: roleSync},
-	"1drv.com":               {Service: "OneDrive", Role: roleSync},
-	"onedrive.live.com":      {Service: "OneDrive", Role: roleSync},
+	"1drv.com":               {Service: "OneDrive", Role: roleSync, Category: "microsoft"},
+	"onedrive.live.com":      {Service: "OneDrive", Role: roleSync, Category: "microsoft"},
 	// Encrypted DNS resolvers.
-	"dns.google":         {Service: "Google DNS", Role: roleDNS},
-	"cloudflare-dns.com": {Service: "Cloudflare DNS", Role: roleDNS},
-	"one.one.one.one":    {Service: "Cloudflare DNS", Role: roleDNS},
-	"dns.apple.com":      {Service: "Apple DNS", Role: roleDNS},
-	"dns.adguard.com":    {Service: "AdGuard DNS", Role: roleDNS},
-	"adguard-dns.com":    {Service: "AdGuard DNS", Role: roleDNS},
-	"dns.quad9.net":      {Service: "Quad9 DNS", Role: roleDNS},
-	"nextdns.io":         {Service: "NextDNS", Role: roleDNS},
-	"doh.opendns.com":    {Service: "OpenDNS", Role: roleDNS},
+	"dns.google":         {Service: "Google DNS", Role: roleDNS, Category: "dns"},
+	"cloudflare-dns.com": {Service: "Cloudflare DNS", Role: roleDNS, Category: "dns"},
+	"one.one.one.one":    {Service: "Cloudflare DNS", Role: roleDNS, Category: "dns"},
+	"dns.apple.com":      {Service: "Apple DNS", Role: roleDNS, Category: "dns"},
+	"dns.adguard.com":    {Service: "AdGuard DNS", Role: roleDNS, Category: "dns"},
+	"adguard-dns.com":    {Service: "AdGuard DNS", Role: roleDNS, Category: "dns"},
+	"dns.quad9.net":      {Service: "Quad9 DNS", Role: roleDNS, Category: "dns"},
+	"nextdns.io":         {Service: "NextDNS", Role: roleDNS, Category: "dns"},
+	"doh.opendns.com":    {Service: "OpenDNS", Role: roleDNS, Category: "dns"},
 	// Consumer brands whose registrable domain reads badly on its own.
-	"whatsapp.net":     {Service: "WhatsApp"},
-	"whatsapp.com":     {Service: "WhatsApp"},
-	"instagram.com":    {Service: "Instagram"},
-	"facebook.com":     {Service: "Facebook"},
-	"t.me":             {Service: "Telegram"},
-	"telegram.org":     {Service: "Telegram"},
-	"apple.com":        {Service: "Apple"},
-	"youtube.com":      {Service: "YouTube"},
-	"google.com":       {Service: "Google"},
-	"googleapis.com":   {Service: "Google APIs"},
-	"yandex.ru":        {Service: "Yandex"},
-	"yandex.net":       {Service: "Yandex"},
-	"vk.com":           {Service: "VK"},
-	"vk.me":            {Service: "VK"},
-	"tiktok.com":       {Service: "TikTok"},
-	"tiktokv.com":      {Service: "TikTok"},
-	"fansly.com":       {Service: "Fansly"},
-	"onlyfans.com":     {Service: "OnlyFans"},
-	"wildberries.ru":   {Service: "Wildberries"},
+	"whatsapp.net":     {Service: "WhatsApp", Category: "meta"},
+	"whatsapp.com":     {Service: "WhatsApp", Category: "meta"},
+	"instagram.com":    {Service: "Instagram", Category: "meta"},
+	"facebook.com":     {Service: "Facebook", Category: "meta"},
+	"t.me":             {Service: "Telegram", Category: "telegram"},
+	"telegram.org":     {Service: "Telegram", Category: "telegram"},
+	"apple.com":        {Service: "Apple", Category: "apple"},
+	"youtube.com":      {Service: "YouTube", Category: "google"},
+	"google.com":       {Service: "Google", Category: "google"},
+	"googleapis.com":   {Service: "Google APIs", Category: "google"},
+	"yandex.ru":        {Service: "Yandex", Category: "yandex"},
+	"yandex.net":       {Service: "Yandex", Category: "yandex"},
+	"vk.com":           {Service: "VK", Category: "vk"},
+	"vk.me":            {Service: "VK", Category: "vk"},
+	"tiktok.com":       {Service: "TikTok", Category: "bytedance"},
+	"tiktokv.com":      {Service: "TikTok", Category: "bytedance"},
+	"fansly.com":       {Service: "Fansly", Category: "fansly"},
+	"onlyfans.com":     {Service: "OnlyFans", Category: "work"},
+	"wildberries.ru":   {Service: "Wildberries", Category: "wildberries"},
 	"ozon.ru":          {Service: "Ozon"},
-	"apps.apple.com":   {Service: "App Store"},
-	"itunes.apple.com": {Service: "App Store"},
+	"apps.apple.com":   {Service: "App Store", Category: "apple"},
+	"itunes.apple.com": {Service: "App Store", Category: "apple"},
 	// --- Rules mined from the production VPN (15 days, 12 clients): the hosts
 	// that used to fall into cloudflare/aws/cdn/other by volume. Category values
 	// here are coarse buckets for the Mix; the service label is what the owner
@@ -244,14 +244,14 @@ var builtinServiceRules = map[string]serviceRule{
 	"sorokodin.co.uk":    {Service: "Telegram Web", Category: "telegram"},
 	"telega.one":         {Service: "Telegram", Category: "telegram"},
 	// Google's own static/update edges.
-	"gvt1.com":  {Service: "Google", Role: roleCDN},
-	"ggpht.com": {Service: "Google", Role: roleCDN},
+	"gvt1.com":  {Service: "Google", Role: roleCDN, Category: "google"},
+	"ggpht.com": {Service: "Google", Role: roleCDN, Category: "google"},
 	// Microsoft/Azure blob + CDN.
-	"blob.core.windows.net": {Service: "Azure Storage", Role: roleCDN},
-	"azureedge.net":         {Service: "Azure CDN", Role: roleCDN},
+	"blob.core.windows.net": {Service: "Azure Storage", Role: roleCDN, Category: "microsoft"},
+	"azureedge.net":         {Service: "Azure CDN", Role: roleCDN, Category: "microsoft"},
 	// Ad SDK / RTB exchanges found only by time-correlation with AppLovin and
 	// Vungle traffic on production phones (they never appear alone).
-	"unity3d.com":          {Service: "Unity Ads", Role: roleAds, Category: "ads"},
+	"cloud.unity3d.com":    {Service: "Unity Cloud", Role: roleTelemetry, Category: "ads"},
 	"rayjump.com":          {Service: "Mintegral", Role: roleAds, Category: "ads"},
 	"mtgglobals.com":       {Service: "Mintegral", Role: roleAds, Category: "ads"},
 	"tiktokpangle.com":     {Service: "Pangle", Role: roleAds, Category: "ads"},
@@ -319,12 +319,27 @@ var builtinServiceRules = map[string]serviceRule{
 	"vkuser.net":            {Service: "VK", Role: roleCDN, Category: "vk"},
 	"vkuserphoto.ru":        {Service: "VK", Role: roleCDN, Category: "vk"},
 	"vk.ru":                 {Service: "VK", Category: "vk"},
-	"tiktokcdn-eu.com":      {Service: "TikTok", Role: roleMedia},
-	"ibyteimg.com":          {Service: "CapCut/TikTok", Role: roleCDN},
-	"cdn-apple.com":         {Service: "Apple", Role: roleCDN},
-	"apple-dns.net":         {Service: "Apple", Role: roleCDN},
-	"aaplimg.com":           {Service: "Apple", Role: roleCDN},
-	"gateway.icloud.com":    {Service: "iCloud"},
+	"tiktokcdn-eu.com":      {Service: "TikTok", Role: roleMedia, Category: "bytedance"},
+	"ibyteimg.com":          {Service: "CapCut/TikTok", Role: roleCDN, Category: "bytedance"},
+	"cdn-apple.com":         {Service: "Apple", Role: roleCDN, Category: "apple"},
+	"apple-dns.net":         {Service: "Apple", Role: roleCDN, Category: "apple"},
+	"aaplimg.com":           {Service: "Apple", Role: roleCDN, Category: "apple"},
+	"gateway.icloud.com":    {Service: "iCloud", Category: "apple"},
+	// Brand hosts whose names carry no switch substring; the pin keeps them
+	// with their brand instead of "other" (P1 of the 2026-09-14 review).
+	"messenger.com":      {Service: "Messenger", Category: "meta"},
+	"fb.com":             {Service: "Facebook", Category: "meta"},
+	"fbsbx.com":          {Service: "Facebook", Role: roleCDN, Category: "meta"},
+	"threads.net":        {Service: "Threads", Category: "meta"},
+	"apple-cloudkit.com": {Service: "iCloud", Category: "apple"},
+	"apple-mapkit.com":   {Service: "Apple Maps", Category: "apple"},
+	"kinopoisk.ru":       {Service: "Кинопоиск", Role: roleMedia, Category: "yandex"},
+	"dzen.ru":            {Service: "Дзен", Category: "yandex"},
+	// Third-party infrastructure by name: never a session leader, keeps its
+	// infra category so the Mix still shows "whose backbone".
+	"cloudflare.com":     {Service: "Cloudflare", Role: roleCDN, Category: "cloudflare"},
+	"cloudflare-ech.com": {Service: "Cloudflare", Role: roleCDN, Category: "cloudflare"},
+	"amazonaws.com":      {Service: "AWS", Role: roleCDN, Category: "aws"},
 }
 
 // activeServiceRules is the merged builtin+override view, swapped atomically
@@ -377,6 +392,22 @@ func lookupServiceRule(host string) (serviceRule, bool) {
 	if h == "" || net.ParseIP(h) != nil {
 		return serviceRule{}, false
 	}
+	return lookupServiceRuleHost(h)
+}
+
+// serviceRuleCategoryForHost is the capture hot-path entry: the caller has
+// already lowercased h and proved it is not an IP, so no normalization or
+// parse runs per flow.
+func serviceRuleCategoryForHost(h string) string {
+	if r, ok := lookupServiceRuleHost(strings.TrimSuffix(h, ".")); ok {
+		return r.Category
+	}
+	return ""
+}
+
+// lookupServiceRuleHost walks h, then each parent suffix, over the active
+// table. Label-safe: "notx.com" never reaches the "x.com" rule.
+func lookupServiceRuleHost(h string) (serviceRule, bool) {
 	serviceRulesMu.RLock()
 	table := activeServiceRules
 	serviceRulesMu.RUnlock()

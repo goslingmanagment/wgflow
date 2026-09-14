@@ -53,15 +53,6 @@ const (
 	timelineBaselineCacheMax = 32
 )
 
-// timelineInfraCategories are the "whose backbone" labels that must never
-// headline a session: "the person used Cloudflare" is not an answer to "what
-// were they doing".
-var timelineInfraCategories = map[string]bool{
-	"cloudflare": true,
-	"aws":        true,
-	"cdn":        true,
-}
-
 type apiTimelineService struct {
 	Service  string `json:"service"`
 	Role     string `json:"role"`
@@ -93,6 +84,9 @@ type apiTimelineSessionService struct {
 	Down      uint64 `json:"down"`
 	Up        uint64 `json:"up"`
 	Direction string `json:"direction"`
+	// Unnamed marks a bare-IP aggregate led only by its network owner; the UI
+	// must render it as "without a name", never as a hostname.
+	Unnamed bool `json:"unnamed"`
 }
 
 type apiTimelineSession struct {
@@ -280,16 +274,21 @@ type timelineBaseline struct {
 	known map[string]bool
 }
 
-func (b timelineBaseline) isNewIn(service string, minuteStart int64) bool {
+// newFromMinute reports the first minute (unix/60) from which service counts
+// as new: the minute of its earliest trace inside the window, provided the
+// two hours before the window never saw it. Rollup rows bucket on the FLUSH
+// minute (ts_end, 30 s cadence), so a handshake at :02:40 lands in a :03 row —
+// the caller marks the first row-bearing minute at or after this one, never
+// only the exact minute of the handshake.
+func (b timelineBaseline) newFromMinute(service string) (int64, bool) {
 	if service == "" || b.known[service] {
-		return false
+		return 0, false
 	}
 	ts, ok := b.first[service]
 	if !ok {
-		return false
+		return 0, false
 	}
-	sec := ts.Unix()
-	return sec >= minuteStart && sec < minuteStart+60
+	return ts.Unix() / 60, true
 }
 
 // The baseline walk reads two hours of both JSONL logs. A polled timeline would
@@ -459,6 +458,7 @@ func timelineAddressQType(t string) bool {
 // activity. Only minutes that moved bytes are returned, ascending.
 func timelineMinutes(byMinute map[int64][]*TopAgg, attrs map[string]apiFlowAttribution, base timelineBaseline, fromMin, toMin int64) []timelineMinuteData {
 	out := make([]timelineMinuteData, 0, len(byMinute))
+	markedNew := map[string]bool{}
 	for minute := fromMin; minute <= toMin; minute++ {
 		rows := byMinute[minute]
 		if len(rows) == 0 {
@@ -471,7 +471,11 @@ func timelineMinutes(byMinute map[int64][]*TopAgg, attrs map[string]apiFlowAttri
 			key := timelineResolve(a, attrs)
 			agg := index[key]
 			if agg == nil {
-				agg = &timelineServiceAgg{key: key, isNew: base.isNewIn(key.Service, t)}
+				agg = &timelineServiceAgg{key: key}
+				if nm, ok := base.newFromMinute(key.Service); ok && minute >= nm && !markedNew[key.Service] {
+					agg.isNew = true
+					markedNew[key.Service] = true
+				}
 				index[key] = agg
 				md.services = append(md.services, agg)
 			}
@@ -609,6 +613,7 @@ func timelineSessionService(a *timelineServiceAgg) apiTimelineSessionService {
 		Service: a.key.Service, Role: a.key.Role, Category: a.category,
 		Bytes: a.bytes(), Down: a.down, Up: a.up,
 		Direction: directionHint(a.up, a.down),
+		Unnamed:   a.key.Unnamed,
 	}
 }
 
@@ -622,7 +627,11 @@ func pickTimelineLeader(order []*timelineServiceAgg) *timelineServiceAgg {
 		if acc.key.Unnamed || acc.key.Service == "" {
 			continue
 		}
-		if !isLeaderRole(acc.key.Role) || timelineInfraCategories[acc.category] {
+		// A named service is judged by its ROLE, never by the stored category:
+		// rows written before the categorizer fix carry "cloudflare" for apps
+		// that merely sit behind Cloudflare, while true infrastructure names
+		// (cloudflare.com, amazonaws.com) carry the cdn role from the rules.
+		if !isLeaderRole(acc.key.Role) {
 			continue
 		}
 		return acc
@@ -658,7 +667,7 @@ func (s *webServer) handleClientTimeline(w http.ResponseWriter, r *http.Request,
 	}
 	// A window wider than the cap still reports db_ok honestly (the open above is
 	// the probe) but renders nothing: null minutes, null sessions, a note.
-	if n := toMin - fromMin + 1; n <= 0 || n > timelineMaxMinutes {
+	if n := toMin - fromMin + 1; n <= 0 || n > timelineMaxMinutes+1 { // +1: a 6h window spans 361 minute buckets
 		if db != nil {
 			_ = db.Close()
 		}

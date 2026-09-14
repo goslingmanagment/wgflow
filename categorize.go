@@ -158,39 +158,53 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 			return cat
 		}
 	}
-	// ipHint gates every IP test in the switch: an address-range guess is
-	// evidence ONLY when there is no name. A named target used to inherit the
-	// label of whatever network its packets crossed — upload.picsart.com on a
-	// Cloudflare edge read as "cloudflare", which answers "whose backbone"
-	// when the question was "what was the person doing". The org of a named
-	// target's IP still reaches the reader as target_org, never as category.
-	ipHint := ip
 	if t != "" {
-		ipHint = ""
-		// A service rule that pins a category (ad/telemetry SDKs) outranks the
-		// brand switch: ms.applovin.com is an ad SDK, not "an AppLovin site".
-		if c := targetRuleCategory(t); c != "" {
+		// STUN/TURN and DoT ports are unambiguous even on a brand host:
+		// stun.l.google.com is a call, not "Google browsing".
+		switch cat := categorizeByPort(proto, port, ip); cat {
+		case "calls", "dns":
+			return cat
+		}
+		// Private Relay masks are a proxy before any rule or brand test.
+		if isPrivateRelayName(t) {
+			return "proxy"
+		}
+		// A service rule that pins a category (ad/telemetry SDKs, DoH
+		// resolvers, brand apexes) outranks the substring switch:
+		// ms.applovin.com is an ad SDK, not "an AppLovin site".
+		if c := serviceRuleCategoryForHost(t); c != "" {
 			return c
 		}
+	}
+	// infraIP gates the IP tests of THIRD-PARTY infrastructure (Cloudflare): a
+	// named target on a Cloudflare edge is the named service, not "cloudflare"
+	// — upload.picsart.com used to read as cloudflare, which answers "whose
+	// backbone" when the question was "what was the person doing". First-party
+	// brand ranges (Google 142.250, Meta 157.240, Apple 17/8, Yandex, VK,
+	// Telegram) stay live for named targets: nobody else is hosted there, so
+	// play.google.com on 142.250.x is Google even when no name rule says so.
+	infraIP := ip
+	if t != "" {
+		infraIP = ""
 	}
 	switch {
 	// Before the apple case: mask*.icloud.com is iCloud Private Relay — a
 	// proxy tunnel, not regular Apple service chatter.
 	case isPrivateRelayName(t):
 		return "proxy"
-	case containsAny(t, "instagram", "fbcdn", "facebook", "whatsapp", "meta.com") || ipPrefix(ipHint, "57.144.", "157.240.", "31.13.", "163.70."):
+	case containsAny(t, "instagram", "fbcdn", "facebook", "whatsapp", "meta.com") || ipPrefix(ip, "57.144.", "157.240.", "31.13.", "163.70."):
 		return "meta"
-	case containsAny(t, "youtube", "googlevideo", "ytimg", "googleapis", "googleusercontent") || ipPrefix(ipHint, "142.250.", "142.251.", "172.217.", "173.194.", "74.125.", "216.239."):
+	case containsAny(t, "youtube", "googlevideo", "ytimg", "googleapis", "googleusercontent") || ipPrefix(ip, "142.250.", "142.251.", "172.217.", "173.194.", "74.125.", "216.239."):
 		return "google"
-	case containsAny(t, "yandex", "yastatic", "ya.ru", "strm.yandex", "appmetrica") || ipPrefix(ipHint, "87.250.", "213.180.", "37.9.", "37.140.", "5.45.", "5.255.", "77.88."):
+	case containsAny(t, "yandex", "yastatic", "ya.ru", "strm.yandex", "appmetrica") || ipPrefix(ip, "87.250.", "213.180.", "37.9.", "37.140.", "5.45.", "5.255.", "77.88."):
 		return "yandex"
-	case containsAny(t, "icloud", "apple.com", "mzstatic", "itunes", "aaplimg") || ipPrefix(ipHint, "17."):
+	case containsAny(t, "icloud", "apple.com", "mzstatic", "itunes", "aaplimg") || ipPrefix(ip, "17."):
 		return "apple"
-	case containsAny(t, "telegram", "t.me") || ipPrefix(ipHint, "149.154.", "91.108.", "91.105."):
+	case containsAny(t, "telegram", "t.me") || ipPrefix(ip, "149.154.", "91.108.", "91.105."):
 		return "telegram"
-	case containsAny(t, "tiktok", "tiktokcdn", "tiktokv", "capcut", "capcutapi", "ibyteimg", "byteimg", "byteoversea", "snssdk", "muscdn", "pstatp") || ipPrefix(ipHint, "71.18."):
+	case containsAny(t, "tiktok", "tiktokcdn", "tiktokv", "capcut", "capcutapi", "ibyteimg", "byteimg", "byteoversea", "snssdk", "muscdn", "pstatp") || ipPrefix(ip, "71.18."):
 		return "bytedance"
-	case containsAny(t, "vk.com", "vkontakte", "userapi.com", "vk-cdn", "mycdn.me", "vkuser", "vkgroup", "vk.me") || ipPrefix(ipHint, "87.240.", "93.186.", "95.142.", "95.213."):
+	case containsAny(t, "vk.com", "vkontakte", "userapi.com", "vk-cdn", "mycdn.me", "vkuser", "vkgroup", "vk.me") || ipPrefix(ip, "87.240.", "93.186.", "95.142.", "95.213."):
 		return "vk"
 	case containsAny(t, "netflix", "nflxvideo", "nflximg", "nflxext", "nflxso"):
 		return "netflix"
@@ -206,9 +220,9 @@ func categorize(target, remoteIP, proto string, port uint16) string {
 		return "wildberries"
 	case containsAny(t, "fansly", "fbuddy"):
 		return "fansly"
-	case containsAny(t, "one.one.one.one") || ipHint == "1.1.1.1" || ipHint == "1.0.0.1":
+	case containsAny(t, "one.one.one.one") || ip == "1.1.1.1" || ip == "1.0.0.1":
 		return "dns"
-	case containsAny(t, "cloudflare", "workers.dev", "pages.dev") || ipPrefix(ipHint,
+	case containsAny(t, "cloudflare", "workers.dev", "pages.dev") || ipPrefix(infraIP,
 		"104.16.", "104.17.", "104.18.", "104.19.", "104.20.", "104.21.", "104.22.", "104.23.",
 		"104.24.", "104.25.", "104.26.", "104.27.", "104.28.", "104.29.", "104.30.", "104.31.",
 		"162.158.", "162.159.", "172.64.", "172.65.", "172.66.", "172.67.", "172.68.", "172.69.",

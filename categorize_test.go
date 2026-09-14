@@ -218,7 +218,21 @@ func TestCategorizeCommonInfrastructure(t *testing.T) {
 		{"static.example", "104.29.153.158", "other"},
 		{"104.29.153.158", "104.29.153.158", "cloudflare"},
 		{"upload.picsart.com", "104.29.153.158", "other"},
-		{"upload.picsart.com", "17.1.1.1", "other"},
+		// First-party ranges stay live for names: nobody but Apple is on 17/8,
+		// nobody but Google on 142.250 — brand hosts without a name rule keep
+		// their brand instead of falling to "other".
+		{"upload.picsart.com", "17.1.1.1", "apple"},
+		{"www.google.com", "142.250.74.4", "google"},
+		{"lh3.ggpht.com", "142.250.74.4", "google"},
+		{"mtalk.google.com", "", "google"},
+		{"www.messenger.com", "157.240.1.1", "meta"},
+		{"edge-chat.fb.com", "", "meta"},
+		{"gateway.fe.apple-dns.net", "17.1.1.1", "apple"},
+		{"mask.icloud.com", "17.1.1.1", "proxy"},
+		// DoH resolvers are dns (background) whichever edge answers.
+		{"chrome.cloudflare-dns.com", "1.1.1.1", "dns"},
+		{"dns.google", "8.8.8.8", "dns"},
+		{"docs.unity3d.com", "", "other"}, // only the ads/cloud subdomains are SDKs
 		// Ad/telemetry SDK rules outrank the brand switch.
 		{"ms.applovin.com", "", "ads"},
 		{"logs.ads.vungle.com", "", "ads"},

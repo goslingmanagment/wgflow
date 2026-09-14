@@ -1240,7 +1240,11 @@ func classify(series []uint64, startMinute int64, total uint64, cats []apiCatSha
 	// does not run on its own. Below the byte rules on purpose — this is the
 	// weakest active signal, so it never upgrades a confidence the volume
 	// rules already earned.
-	case sdkHits > 0 && (fresh || minOver100KB > 0):
+	// Ad/telemetry SDK hosts alone are not proof of a person: AppMetrica and
+	// Crashlytics phone home at night next to iCloud sync (1.2 % of SDK hits
+	// on production have no consumer app around them). Only a FRESH trace
+	// turns them into a hedged "active"; volume alone never does.
+	case sdkHits > 0 && fresh:
 		v.Status = "active"
 		v.Confidence = boolPick(phone, "medium", "low")
 		sdkReason()
@@ -1863,13 +1867,24 @@ type apiHour struct {
 // The folded row keeps its place in the sorted list by its summed total.
 // Fewer than sdkFoldMinRows SDK rows are left exactly as they are.
 func foldSDKRows(rows []apiFlow) []apiFlow {
-	members := 0
+	// Members are distinct SDK services, not rows: ms.applovin.com over tcp and
+	// udp is one member, and one member is never worth a fold.
+	byService := map[string]uint64{}
+	order := []string{}
 	for _, f := range rows {
-		if isSDKRole(f.Role) {
-			members++
+		if !isSDKRole(f.Role) {
+			continue
 		}
+		name := f.Service
+		if name == "" {
+			name = apiFlowDisplayTarget(f)
+		}
+		if _, seen := byService[name]; !seen {
+			order = append(order, name)
+		}
+		byService[name] += f.Total
 	}
-	if members < sdkFoldMinRows {
+	if len(order) < sdkFoldMinRows {
 		return rows
 	}
 	folded := apiFlow{
@@ -1877,11 +1892,9 @@ func foldSDKRows(rows []apiFlow) []apiFlow {
 		Service:  sdkFoldService,
 		Role:     roleAds,
 		Category: "ads",
-		Members:  members,
+		Members:  len(order),
 	}
-	byService := map[string]uint64{}
-	order := make([]string, 0, members)
-	kept := make([]apiFlow, 0, len(rows)-members+1)
+	kept := make([]apiFlow, 0, len(rows))
 	for _, f := range rows {
 		if !isSDKRole(f.Role) {
 			kept = append(kept, f)
@@ -1892,14 +1905,6 @@ func foldSDKRows(rows []apiFlow) []apiFlow {
 		}
 		folded.Down += f.Down
 		folded.Up += f.Up
-		name := f.Service
-		if name == "" {
-			name = apiFlowDisplayTarget(f)
-		}
-		if _, seen := byService[name]; !seen {
-			order = append(order, name)
-		}
-		byService[name] += f.Total
 	}
 	folded.Total = folded.Down + folded.Up
 	folded.Direction = directionHint(folded.Up, folded.Down)
@@ -2008,7 +2013,12 @@ func (s *webServer) handleClientDetail(w http.ResponseWriter, r *http.Request) {
 		}
 		targets = append(targets, f)
 	}
-	sort.Slice(targets, func(i, j int) bool { return targets[i].Total > targets[j].Total })
+	sort.SliceStable(targets, func(i, j int) bool {
+		if targets[i].Total != targets[j].Total {
+			return targets[i].Total > targets[j].Total
+		}
+		return targets[i].Target < targets[j].Target // deterministic between polls
+	})
 	targets = foldSDKRows(targets)
 	if len(targets) > detailTopTargets {
 		targets = targets[:detailTopTargets]

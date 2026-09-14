@@ -133,10 +133,17 @@ func serve(args []string) error {
 	var cidrList multiFlag
 	cidrList = append(cidrList, "10.66.66.0/24", "fd42:42:42::/64")
 	fs.Var(&cidrList, "vpn-cidr", "VPN client CIDR; can be repeated")
+	clientsConfig := fs.String("clients-config", "/etc/wgflow/clients.yaml", "clients.yaml; the capture daemon applies its services: rules so pinned categories reach the rollup")
 	var extraSourceList multiFlag
 	fs.Var(&extraSourceList, "extra-source", "additional capture source: name=NAME,iface=IFACE,wg-config=PATH,cidrs=CIDR|CIDR,netns=PATH")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// Service-rule overrides pin capture-time categories; without this the
+	// daemon would categorize with builtins only and the panel's clients.yaml
+	// would apply on read alone (a missing file is fine).
+	if _, err := loadAliasConfig(*clientsConfig); err != nil {
+		log.Printf("WARNING: %s: %v — using builtin service rules only", *clientsConfig, err)
 	}
 	cfg.VPNCIDRs = cidrList
 	retention, err := parseRetention(*retentionStr)

@@ -492,8 +492,13 @@ func TestClientDetailFoldsSDKRows(t *testing.T) {
 	if !ok {
 		t.Fatalf("no folded row in top_targets: %+v", detail.TopTargets)
 	}
-	if folded.Members != len(sdkDomains) {
-		t.Errorf("folded members = %d, want %d", folded.Members, len(sdkDomains))
+	// Members count distinct SDK services, not rows (tcp+udp of one host is one).
+	distinct := map[string]bool{}
+	for _, d := range sdkDomains {
+		distinct[targetService(d)] = true
+	}
+	if folded.Members != len(distinct) {
+		t.Errorf("folded members = %d, want %d distinct services", folded.Members, len(distinct))
 	}
 	if folded.Total != sdkTotal || folded.Down != sdkTotal {
 		t.Errorf("folded total/down = %d/%d, want %d", folded.Total, folded.Down, sdkTotal)

@@ -539,8 +539,10 @@ func TestClassifyRules(t *testing.T) {
 		{"burst with ad SDKs", []uint64{25 * MB}, 25 * MB, cat("ads", 25*MB), 3, "phone", zero, true, "active", "high", true},
 		// The new case: too small for the byte rules, but ad SDKs do not run
 		// on their own — one >100KB minute or a fresh trace is enough.
-		{"ad SDKs + one significant minute", []uint64{150 * KB}, 150 * KB, cat("ads", 150*KB), 7, "phone", zero, true, "active", "medium", true},
-		{"ad SDKs on a laptop are softer", []uint64{150 * KB}, 150 * KB, cat("ads", 150*KB), 7, "laptop", zero, true, "active", "low", true},
+		// Volume alone never promotes SDK chatter: a night-time AppMetrica ping
+		// next to a 150 KB iCloud minute is not a person.
+		{"ad SDKs + one significant minute, no fresh trace", []uint64{150 * KB}, 150 * KB, cat("ads", 150*KB), 7, "phone", zero, true, "likely-background", "low", false},
+		{"ad SDKs + fresh trace on a laptop are softer", []uint64{150 * KB}, 150 * KB, cat("ads", 150*KB), 7, "laptop", fresh, true, "active", "low", true},
 		{"ad SDKs behind apple-only, fresh trace", []uint64{40 * KB}, 40 * KB, cat("apple", 40*KB), 2, "phone", fresh, true, "active", "medium", true},
 		// Without a fresh trace or a significant minute the SDK hint is not
 		// enough on its own: no rule invents activity from a whisper.
