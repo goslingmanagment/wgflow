@@ -15,7 +15,7 @@ wgflow report --since 24h --log-dir /var/log/wgflow
 wgflow rollup-import --since 24h
 wgflow rollup-prune --keep 31d --detail-keep 7d
 wgflow stats --log-dir /var/log/wgflow --json
-wgflow web --listen :8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db
+wgflow web --listen 127.0.0.1:8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db
 ```
 
 ## Service
@@ -83,14 +83,14 @@ Build the UI first, then the binary embeds it:
 ```sh
 cd webui && pnpm install && pnpm build && cd ..
 go build -o wgflow .
-wgflow web --listen :8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db
+wgflow web --listen 127.0.0.1:8080 --log-dir /var/log/wgflow --rollup /var/lib/wgflow/rollup.db
 ```
 
 For UI development, run the backend and the Vite dev server in parallel — Vite
-proxies `/api` to the backend on `:8080`:
+proxies `/api` to the backend on `127.0.0.1:8080`:
 
 ```sh
-wgflow web --listen :8080 &
+wgflow web --listen 127.0.0.1:8080 &
 pnpm --dir webui dev
 ```
 
@@ -137,7 +137,7 @@ db-ip ASN Lite works without registration (CC-BY): download
 gunzip it, and pass the path:
 
 ```sh
-wgflow web --listen :8080 --asn-db /var/lib/wgflow/dbip-asn-lite.mmdb
+wgflow web --listen 127.0.0.1:8080 --asn-db /var/lib/wgflow/dbip-asn-lite.mmdb
 ```
 
 The database is consulted only after the builtin table misses, only in the web
