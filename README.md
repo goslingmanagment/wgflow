@@ -38,6 +38,17 @@ wgflow serve \
   --extra-source "name=wg-easy,iface=wg0,wg-config=/opt/wg-easy/etc-wireguard/wg0.conf,cidrs=10.8.0.0/24|fdcc:ad94:bacf:61a4::/64,netns=/proc/$pid/ns/net"
 ```
 
+When WireGuard runs only inside a container (for example AmneziaWG in
+`wg-easy`), point the primary source at the container's namespace with
+`--netns` instead of adding an extra source:
+
+```sh
+pid=$(docker inspect -f '{{.State.Pid}}' awg-easy)
+wgflow serve --iface wg0 --netns /proc/$pid/ns/net \
+  --wg-config /var/lib/docker/volumes/awg-easy_etc_wireguard/_data/wg0.conf \
+  --vpn-cidr 10.77.77.0/24
+```
+
 Opening a socket in another network namespace requires `CAP_SYS_ADMIN` during
 startup in addition to the capture service's existing `CAP_NET_RAW` and
 `CAP_NET_ADMIN`. A capability-sandboxed service that opens another process's

@@ -134,6 +134,7 @@ func serve(args []string) error {
 	cidrList = append(cidrList, "10.66.66.0/24", "fd42:42:42::/64")
 	fs.Var(&cidrList, "vpn-cidr", "VPN client CIDR; can be repeated")
 	clientsConfig := fs.String("clients-config", "/etc/wgflow/clients.yaml", "clients.yaml; the capture daemon applies its services: rules so pinned categories reach the rollup")
+	primaryNetNS := fs.String("netns", "", "network namespace of --iface, e.g. a container's /proc/PID/ns/net (default: the daemon's own)")
 	var extraSourceList multiFlag
 	fs.Var(&extraSourceList, "extra-source", "additional capture source: name=NAME,iface=IFACE,wg-config=PATH,cidrs=CIDR|CIDR,netns=PATH")
 	if err := fs.Parse(args); err != nil {
@@ -174,7 +175,8 @@ func serve(args []string) error {
 
 	sourceSpecs := []CaptureSourceSpec{{
 		Name: cfg.Iface, Iface: cfg.Iface, WGConfigPath: cfg.WGConfigPath,
-		VPNCIDRs: append([]string(nil), cfg.VPNCIDRs...),
+		VPNCIDRs:  append([]string(nil), cfg.VPNCIDRs...),
+		NetNSPath: *primaryNetNS,
 	}}
 	sourceNames := map[string]bool{cfg.Iface: true}
 	for _, raw := range extraSourceList {
