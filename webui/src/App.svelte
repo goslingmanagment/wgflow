@@ -32,10 +32,10 @@
   let route = $state(parse())
   function parse() {
     const h = location.hash.replace(/^#\/?/, '') || 'clients'
-    const [name, param] = h.split('/')
+    const [name, param, server] = h.split('/')
     if (!param) return { name, param: '' }
     try {
-      return { name, param: decodeURIComponent(param) }
+      return { name, param: decodeURIComponent(param), server: server ? decodeURIComponent(server) : '' }
     } catch {
       // Malformed percent-encoding (#/clients/%zz) must not crash the mount —
       // fall back to the default route.
@@ -49,7 +49,10 @@
 
   let now = $state(new Date())
   let serversReady = $state(false)
-  loadServers().finally(() => (serversReady = true))
+  loadServers().finally(() => {
+    setServer(route.server)
+    serversReady = true
+  })
 
   // One live stream per selected server; switching servers reopens it.
   $effect(() => {
@@ -78,6 +81,9 @@
   onMount(() => {
     const onHash = () => {
       route = parse()
+      // A device link pins its server (clientHref); set it in the same tick so
+      // the page remounts once, already on that server. Unknown names are ignored.
+      setServer(route.server)
       // A route change is a page change — don't inherit the old scroll depth.
       scrollTo(0, 0)
     }

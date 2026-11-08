@@ -4,6 +4,7 @@
   import { createResource } from '../lib/resource.svelte.js'
   import { debounced } from '../lib/debounce.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
+  import { clientHref } from '../lib/server.svelte.js'
   import TargetCell, { appTitle, infraTitle } from '../lib/TargetCell.svelte'
   import Win from '../lib/Win.svelte'
 
@@ -45,7 +46,7 @@
         <tbody>
           {#each rows as f}
             <tr>
-              <td><a href="#/clients/{encodeURIComponent(f.client)}">{f.client}</a></td>
+              <td><a href={clientHref(f.client)}>{f.client}</a></td>
               <td><span class="cd" style="background:{catColor(f.category)}"></span>{f.category}</td>
               <td class="app" title={appTitle(f)}><TargetCell row={f} kind="app" /></td>
               <td class="infra" title={infraTitle(f)}><TargetCell row={f} kind="infra" /></td>

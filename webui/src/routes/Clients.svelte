@@ -1,8 +1,8 @@
 <script>
   import { setGroup, trackRefreshTick, ui } from '../lib/store.svelte.js'
-  import { fmtBytes, fmtRate, sinceSeconds, catColor, verdictColor, deviceGlyph, roleLabel } from '../lib/format.js'
+  import { fmtBytes, fmtRate, sinceSeconds, catColor, verdictColor, deviceGlyph, roleLabel, hhmmMSK } from '../lib/format.js'
   import { createResource } from '../lib/resource.svelte.js'
-  import { aggVerdict, personOf } from '../lib/verdict.js'
+  import { aggVerdict, personOf, VERDICT_ORDER } from '../lib/verdict.js'
   import Mix from '../lib/Mix.svelte'
   import Spark from '../lib/Spark.svelte'
   import Icon from '../lib/Icon.svelte'
@@ -11,7 +11,7 @@
   import VerdictBadge from '../lib/VerdictBadge.svelte'
   import InfoTip from '../lib/InfoTip.svelte'
   import Srez from '../lib/Srez.svelte'
-  import { onServer, servers, setServer } from '../lib/server.svelte.js'
+  import { clientHref, onServer, servers } from '../lib/server.svelte.js'
 
   const EDNS_TIP = 'Клиент использует шифрованный DNS (DoH/DoT) — DNS-журнал неполон, атрибуция доменов может занижаться.'
 
@@ -19,35 +19,40 @@
   let sort = $state('total')
   let srezOpen = $state(false)
   // Several servers: one board with every server's clients (no switching);
-  // each device carries its server, and opening it selects that server.
+  // each device carries its server, and its link pins that server (clientHref).
   const multi = servers.list.length > 1
-  const res = createResource({ settle: true })
+  // One resource per server (the list is fixed once the page mounts): each loads,
+  // coalesces and goes stale on its own, so a slow or dead server neither holds
+  // up nor blanks the others, and a failed refresh keeps its last rows.
+  const sources = (multi ? servers.list.map((s) => s.name) : [servers.current]).map((server) => ({ server, res: createResource() }))
+  const single = sources[0].res
 
   $effect(() => {
     trackRefreshTick()
     const q = '/api/clients?since=' + ui.since
-    res.load(multi ? servers.list.map((s) => onServer(s.name, q)) : q)
+    for (const { server, res } of sources) res.load(multi ? onServer(server, q) : q)
   })
 
-  // One shape for one or many servers. A server that did not answer is listed
-  // in `failed`; logger/rollup outages are kept per server.
+  // One shape for one or many servers. `failed`: servers whose latest load
+  // failed (rows kept as of `at` when an earlier load succeeded); `pending`:
+  // servers still on their first load. Logger/rollup outages are per server.
   const data = $derived.by(() => {
-    const d = res.data
-    if (!d) return null
-    const answers = multi ? d.map((r, i) => ({ server: servers.list[i].name, ...r })) : [{ server: servers.current, value: d }]
-    const out = { clients: [], failed: [], loggerDown: [], dbDown: [] }
-    for (const a of answers) {
-      if (a.err) {
-        out.failed.push({ server: a.server, err: a.err })
-        continue
-      }
-      const loggerOk = a.value.logger_ok !== false
-      if (!loggerOk) out.loggerDown.push(a.server)
-      if (a.value.db_ok === false) out.dbDown.push(a.server)
-      for (const c of a.value.clients || []) out.clients.push({ ...c, server: a.server, loggerOk })
+    if (!sources.some((s) => s.res.data)) return null
+    const out = { clients: [], failed: [], pending: [], loggerDown: [], dbDown: [] }
+    for (const { server, res } of sources) {
+      const v = res.data
+      if (res.err) out.failed.push({ server, err: res.err, at: v ? res.lastUpdatedAt : null })
+      else if (!v) out.pending.push(server)
+      if (!v) continue
+      const loggerOk = v.logger_ok !== false
+      if (!loggerOk) out.loggerDown.push(server)
+      if (v.db_ok === false) out.dbDown.push(server)
+      for (const c of v.clients || []) out.clients.push({ ...c, server, loggerOk })
     }
     return out
   })
+  // The page-level error: no server has produced any data and every one failed.
+  const loadErr = $derived(sources.every((s) => s.res.err && !s.res.data) ? sources[0].res.err : null)
   const rowKey = (c) => c.server + '\u0000' + c.name
   const onList = (list) => (multi && list.length ? ' (' + list.join(', ') + ')' : '')
 
@@ -90,10 +95,21 @@
         verdict: aggVerdict(g.devices),
         loggerOk: g.devices.every((d) => d.loggerOk),
         servers: [...new Set(g.devices.map((d) => d.server))],
-        disagree: new Set(g.devices.map((d) => d.verdict?.status)).size > 1,
+        disagree: devicesDisagree(g.devices),
       }))
       .sort((a, b) => (sort === 'name' ? a.person.localeCompare(b.person) : b.total - a.total))
   })
+  // One physical device can have a profile on several servers (diana-iphone on
+  // nl3 and on the old server). Judge each device by its liveliest profile, so
+  // an idle spare profile does not read as "this device is silent".
+  function devicesDisagree(devices) {
+    const best = new Map()
+    for (const d of devices) {
+      const s = d.verdict?.status
+      if (!best.has(d.name) || (VERDICT_ORDER[s] || 0) > (VERDICT_ORDER[best.get(d.name)] || 0)) best.set(d.name, s)
+    }
+    return new Set(best.values()).size > 1
+  }
   function isOpen(g) {
     return manualOpen.has(g.key) || g.disagree || g.devices.length === 1
   }
@@ -111,7 +127,8 @@
     <button class:on={sort === 'total'} onclick={() => (sort = 'total')}>volume</button>
     <button class:on={sort === 'name'} onclick={() => (sort = 'name')}>name</button>
     <span class="srch"><Icon name="search" size={15} /><input placeholder="find client" bind:value={search} /></span>
-    <button class="srez-btn" onclick={() => (srezOpen = true)}>Срез</button>
+    <!-- Срез reads one server: the one selected in the header. -->
+    <button class="srez-btn" onclick={() => (srezOpen = true)} title={multi ? 'Срез по серверу из шапки' : ''}>Срез{multi ? ' · ' + servers.current : ''}</button>
   </div>
 </div>
 
@@ -127,16 +144,18 @@
     .join(',')}
 />
 
-{#if res.err && !data}
-  <p class="err">Couldn't load clients. Is <code>wgflow web</code> running? ({res.err})</p>
+{#if loadErr && !data}
+  <p class="err">Couldn't load clients. Is <code>wgflow web</code> running? ({loadErr})</p>
 {:else if !data}
   <p class="dim">Loading…</p>
 {:else}
-  {#if res.stale}
-    <StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />
+  {#if !multi && single.stale}
+    <StaleBanner lastUpdatedAt={single.lastUpdatedAt} err={single.err} />
   {/if}
-  {#each data.failed as f (f.server)}
-    <div class="outage" role="alert">⚠ Сервер {f.server} не ответил ({f.err}), его клиентов здесь нет.</div>
+  {#each multi ? data.failed : [] as f (f.server)}
+    <div class="outage" role="alert">
+      ⚠ Сервер {f.server} не ответил ({f.err}){#if f.at}, его строки на {hhmmMSK(new Date(f.at))} МСК{:else}, его клиентов здесь нет{/if}.
+    </div>
   {/each}
   {#if data.dbDown.length}
     <div class="outage" role="alert">⚠ Rollup DB unavailable{onList(data.dbDown)} — verdicts are unknown and totals may be incomplete.</div>
@@ -146,7 +165,7 @@
       <button class:on={ui.group === 'person'} onclick={() => setGroup('person')}>person</button>
       <button class:on={ui.group === 'device'} onclick={() => setGroup('device')}>device</button>
     </span>
-    {#if ui.group === 'person'}· {grouped.length} people · {rows.length} devices{:else}· {rows.length} seen{/if}{#if multi}{' · '}{servers.list.length - data.failed.length} of {servers.list.length} servers{/if} · last {ui.since} · classification inferred
+    {#if ui.group === 'person'}· {grouped.length} people · {rows.length} devices{:else}· {rows.length} seen{/if}{#if multi}{' · '}{servers.list.length - data.failed.length - data.pending.length} of {servers.list.length} servers{#if data.pending.length}{' (loading ' + data.pending.join(', ') + ')'}{/if}{/if} · last {ui.since} · classification inferred
   </div>
   {#if data.loggerDown.length}
     <div class="outage" role="alert">
@@ -155,7 +174,7 @@
   {/if}
 
   {#snippet deviceRow(c, sub)}
-    <a class="row" class:sub href="#/clients/{encodeURIComponent(c.name)}" onclick={() => setServer(c.server)}>
+    <a class="row" class:sub href={clientHref(c.name, c.server)}>
       <div class="nm">
         <span class="dot" style="background:{verdictColor(c.verdict?.status)}"></span>
         <div class="tx">
