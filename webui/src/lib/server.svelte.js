@@ -31,7 +31,8 @@ export async function loadServers() {
   servers.list = list
   servers.local = list.find((s) => s.local)?.name || ''
   const saved = readSaved()
-  servers.current = list.some((s) => s.name === saved) ? saved : servers.local
+  // A panel-only host has no local logger: start on the first remote.
+  servers.current = list.some((s) => s.name === saved) ? saved : servers.local || list[0]?.name || ''
 }
 
 export function setServer(name) {
