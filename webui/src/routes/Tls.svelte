@@ -4,6 +4,7 @@
   import { createResource } from '../lib/resource.svelte.js'
   import { debounced } from '../lib/debounce.svelte.js'
   import StaleBanner from '../lib/StaleBanner.svelte'
+  import { clientHref } from '../lib/server.svelte.js'
   import Win from '../lib/Win.svelte'
 
   let q = $state('')
@@ -31,7 +32,7 @@
       <div class="site">
         <div class="dm"><span class="cd" style="background:{catColor(s.category)}"></span><span class="t">{s.site}</span></div>
         <div class="hits"><span class="bar"><span style="width:{((s.hits / maxHits) * 100).toFixed(0)}%"></span></span><span class="n mono">{s.hits}</span></div>
-        <div class="cl">{#each s.clients.slice(0, 2) as c}<a class="tag" href="#/clients/{encodeURIComponent(c)}">{c}</a>{/each}{#if s.clients.length > 2}<span class="more">+{s.clients.length - 2}</span>{/if}</div>
+        <div class="cl">{#each s.clients.slice(0, 2) as c}<a class="tag" href={clientHref(c)}>{c}</a>{/each}{#if s.clients.length > 2}<span class="more">+{s.clients.length - 2}</span>{/if}</div>
         <div class="last mono">{ago(s.last)}</div>
       </div>
     {/each}

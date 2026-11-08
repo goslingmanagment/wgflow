@@ -5,6 +5,7 @@
   import Chart from '../lib/Chart.svelte'
   import Mix from '../lib/Mix.svelte'
   import StaleBanner from '../lib/StaleBanner.svelte'
+  import { clientHref } from '../lib/server.svelte.js'
 
   const res = createResource()
 
@@ -58,7 +59,7 @@
     <div class="card">
       <div class="ch"><h3 class="serif">Top clients</h3></div>
       {#each topClients as c}
-        <a class="cli" href="#/clients/{encodeURIComponent(c.name)}">
+        <a class="cli" href={clientHref(c.name)}>
           <div class="row1"><span>{c.name}</span><b class="mono">{fmtBytes(c.total)}</b></div>
           <Mix cats={c.cats} h={7} />
         </a>

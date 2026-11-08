@@ -155,8 +155,11 @@ rejects the password shows as an error on its pages, not as a login prompt.
 The Clients page is the exception to the switcher: with several servers it
 shows every server's devices on one board, each tagged with its server (people
 are merged across servers by name, case-insensitively). A server that does not
-answer is reported above the board while the rest still load. Opening a device
-selects its server for the detail page.
+answer (or is still loading) is reported above the board while the rest show;
+each server loads on its own, and one that fails a refresh keeps its last rows
+with their time. Device links carry the server (`#/clients/<name>/<server>`),
+so back/forward, a new tab or a bookmark opens that server's device even when
+another server has a device of the same name.
 
 A host without its own logger can serve just the switcher: add `--panel-only`
 (the local server is then left out of the list; `--log-dir`/`--rollup` are not

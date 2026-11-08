@@ -55,6 +55,15 @@ export function onServer(name, path) {
   return '@' + encodeURIComponent(name) + path
 }
 
+// clientHref links a device's detail page. With several servers the link pins
+// the server (#/clients/<name>/<server>): the same device name can exist on
+// two servers, and back/forward, a new tab or a bookmark must reopen this one
+// even after the header selection moved. App applies the pinned server.
+export function clientHref(name, server = servers.current) {
+  const base = '#/clients/' + encodeURIComponent(name)
+  return server && servers.list.length > 1 ? base + '/' + encodeURIComponent(server) : base
+}
+
 // apiURL routes an /api/ path to the selected server (or to the server an
 // onServer path names).
 export function apiURL(path) {
