@@ -1,7 +1,8 @@
 <script>
   import { onMount } from 'svelte'
   import { hhmmssMSK } from './lib/format.js'
-  import { maybeAutoRefresh, onStats, onStreamError, refreshHealth, requestRefresh, ui } from './lib/store.svelte.js'
+  import { maybeAutoRefresh, onStats, onStreamError, refreshHealth, requestRefresh, resetHealth, ui } from './lib/store.svelte.js'
+  import { apiURL, loadServers, servers, setServer } from './lib/server.svelte.js'
   import Icon from './lib/Icon.svelte'
   import Win from './lib/Win.svelte'
   import AutoRefresh from './lib/AutoRefresh.svelte'
@@ -47,6 +48,31 @@
   const activeNav = $derived(route.name === 'clients' && route.param ? 'clients' : ROUTES[route.name] ? route.name : 'clients')
 
   let now = $state(new Date())
+  let serversReady = $state(false)
+  loadServers().finally(() => (serversReady = true))
+
+  // One live stream per selected server; switching servers reopens it.
+  $effect(() => {
+    if (!serversReady) return
+    const url = apiURL('/api/stats/stream')
+    resetHealth()
+    let es
+    try {
+      es = new EventSource(url)
+      es.addEventListener('stats', (e) => {
+        try {
+          onStats(JSON.parse(e.data))
+        } catch {}
+      })
+      // EventSource auto-reconnects on error; surface the drop immediately so the
+      // pill reflects it without waiting for the next tick.
+      es.onerror = () => onStreamError()
+    } catch {
+      onStreamError()
+    }
+    return () => es && es.close()
+  })
+
   onMount(() => {
     const onHash = () => {
       route = parse()
@@ -65,25 +91,10 @@
       refreshHealth()
       maybeAutoRefresh(document.visibilityState === 'visible')
     }, 1000)
-    let es
-    try {
-      es = new EventSource('/api/stats/stream')
-      es.addEventListener('stats', (e) => {
-        try {
-          onStats(JSON.parse(e.data))
-        } catch {}
-      })
-      // EventSource auto-reconnects on error; surface the drop immediately so the
-      // pill reflects it without waiting for the next tick.
-      es.onerror = () => onStreamError()
-    } catch {
-      onStreamError()
-    }
     return () => {
       removeEventListener('hashchange', onHash)
       document.removeEventListener('visibilitychange', onVisible)
       clearInterval(clock)
-      es && es.close()
     }
   })
 </script>
@@ -102,6 +113,15 @@
     <header class="top">
       <div class="brand serif">wgflow<span>.</span></div>
       <div class="right">
+        {#if servers.list.length > 1}
+          <label class="srv" title="Сервер, чьи логи показаны">
+            <select value={servers.current} onchange={(e) => setServer(e.currentTarget.value)} aria-label="Сервер">
+              {#each servers.list as s}
+                <option value={s.name}>{s.name}</option>
+              {/each}
+            </select>
+          </label>
+        {/if}
         <span class="clock mono" title="Текущее время МСК">{hhmmssMSK(now)}<small>МСК</small></span>
         <div class="winwrap"><Win /></div>
         <AutoRefresh />
@@ -112,9 +132,12 @@
       <!-- Keyed on param so back/forward between #/clients/A and #/clients/B
            remounts ClientDetail (fresh data/anchor, and the Ribbon's per-minute
            cache can't leak client A's domains into client B). -->
-      {#key route.param}
-        <Current param={route.param} />
-      {/key}
+      {#if serversReady}
+        <!-- Keyed on the server too: every page reloads from scratch for another logger. -->
+        {#key servers.current + '\u0000' + route.param}
+          <Current param={route.param} />
+        {/key}
+      {/if}
     </main>
   </div>
 </div>
@@ -206,6 +229,14 @@
   .winwrap {
     display: flex;
     min-width: 0;
+  }
+  .srv select {
+    background: var(--color-s1);
+    border: 1px solid var(--color-border2);
+    border-radius: 8px;
+    padding: 5px 8px;
+    font-weight: 600;
+    cursor: pointer;
   }
   .clock {
     font-size: 13px;

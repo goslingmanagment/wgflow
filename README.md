@@ -132,6 +132,31 @@ Browser security does not allow sharing cookies between unrelated domains or
 different IP addresses; those require one login per server, after which each
 login remains saved.
 
+### Several servers in one panel
+
+Each VPS keeps its own logger and `wgflow web`. One of the panels can list the
+others and show any of them through a server switcher in the header:
+
+```sh
+WGFLOW_WEB_PASSWORD='change-me' \
+wgflow web --listen :8080 --name nl3 \
+  --remote vpn=http://192.0.2.10:8080 --remote backup=http://198.51.100.7:8080
+```
+
+The panel proxies only the read-only API of the selected server
+(`/s/<name>/api/…`); the UI always comes from the panel itself, and logs never
+leave the server that captured them. It logs in to each remote with
+`WGFLOW_REMOTE_PASSWORD_<NAME>` (name upper-cased, dashes as underscores), then
+`WGFLOW_REMOTE_PASSWORD`, then its own password, so the usual "same password
+everywhere" needs no extra setting. The browser's cookies are not forwarded and
+the remotes' session cookies are dropped. A remote that is unreachable or
+rejects the password shows as an error on its pages, not as a login prompt.
+
+Keep the remotes on the same wgflow version as the panel (or newer): the UI
+calls their API directly. The panel reaches remotes over plain HTTP unless
+their URL is `https://`; restrict the remotes' port to the panel's address if
+the path between servers is not trusted.
+
 The password and session cookie travel in cleartext when the panel itself is
 plain HTTP. Keep it reachable only over WireGuard, an SSH tunnel, or a
 TLS-terminating reverse proxy; do not expose the bare port to the internet.

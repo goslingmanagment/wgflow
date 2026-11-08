@@ -112,6 +112,10 @@ type webServer struct {
 	aliases    *AliasConfig
 	// loc is the -tz day-bucketing zone; nil falls back to MSK (see location).
 	loc *time.Location
+	// name labels this logger in the server switcher; remotes are the other
+	// servers' panels this one proxies (remotes.go).
+	name    string
+	remotes []*remoteServer
 }
 
 // location returns the day-bucketing time zone. The nil fallback keeps the
@@ -145,6 +149,9 @@ func webCmd(args []string) error {
 	_ = fset.String("auth-realm", "wgflow", "deprecated Basic Auth realm (accepted for command-line compatibility)")
 	allowNoAuth := fset.Bool("allow-no-auth", false, "serve without a password even on a non-loopback address (dangerous: the whole household's traffic becomes public)")
 	tzName := fset.String("tz", "Europe/Moscow", "IANA time zone for day bucketing (backend only; the frontend still labels hours in MSK)")
+	serverName := fset.String("name", defaultServerName(), "this server's label in the server switcher")
+	var remoteSpecs remoteFlags
+	fset.Var(&remoteSpecs, "remote", "another server's panel as name=http(s)://host:port, repeatable; password from WGFLOW_REMOTE_PASSWORD_<NAME>, WGFLOW_REMOTE_PASSWORD or this panel's own")
 	if err := fset.Parse(args); err != nil {
 		return err
 	}
@@ -180,7 +187,22 @@ func webCmd(args []string) error {
 			log.Printf("asn-db=%s loaded", *asnDBPath)
 		}
 	}
-	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases, loc: loc}
+	if !remoteNameRe.MatchString(*serverName) {
+		return fmt.Errorf("-name %q: use a-z, 0-9 and dashes", *serverName)
+	}
+	remotes, err := parseRemotes(remoteSpecs, *serverName, *authPassword, os.Getenv)
+	if err != nil {
+		return err
+	}
+	if len(remotes) > 0 && *authPassword == "" && !listenIsLoopback(*listen) {
+		// The proxy logs in to the other servers itself: an open panel (--allow-no-auth)
+		// would hand their history to anyone who reaches this one.
+		return fmt.Errorf("--remote on a non-loopback address needs a login password on this panel too (WGFLOW_WEB_PASSWORD)")
+	}
+	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases, loc: loc, name: *serverName, remotes: remotes}
+	for _, rs := range remotes {
+		log.Printf("remote %s -> %s", rs.name, rs.target.Redacted())
+	}
 	log.Printf("clients-config=%s people=%d devices=%d", *clientsConfig, len(aliases.people), len(aliases.roster))
 	mux := http.NewServeMux()
 	s.routes(mux)
@@ -240,6 +262,8 @@ func (s *webServer) routes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/tls", requireGET(s.handleTLS))
 	mux.HandleFunc("/api/report", requireGET(s.handleReport))
 	mux.HandleFunc("/api/stats/stream", requireGET(s.handleStatsStream))
+	mux.HandleFunc("/api/servers", requireGET(s.handleServers))
+	mux.HandleFunc("/s/", s.handleRemote)
 	mux.Handle("/", s.staticHandler())
 }
 

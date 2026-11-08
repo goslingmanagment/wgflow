@@ -2,6 +2,8 @@
 // so the browser caps us at 6 connections and one is permanently held by the
 // SSE stream — a single hung request would queue everything behind it and
 // freeze the whole panel. `signal` (optional) lets callers abort earlier.
+import { apiURL } from './server.svelte.js'
+
 const FETCH_TIMEOUT_MS = 10_000
 let loginRedirectStarted = false
 
@@ -18,7 +20,7 @@ export async function getJSON(url, signal) {
   const onOuter = () => c.abort()
   signal?.addEventListener('abort', onOuter, { once: true })
   try {
-    const r = await fetch(url, { signal: c.signal })
+    const r = await fetch(apiURL(url), { signal: c.signal })
     if (!r.ok) {
       if (r.status === 401 && !loginRedirectStarted) {
         loginRedirectStarted = true
