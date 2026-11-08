@@ -66,7 +66,8 @@ func (a *passwordAuth) wrap(next http.Handler) http.Handler {
 		}
 
 		noStore(w)
-		if strings.HasPrefix(r.URL.Path, "/api/") {
+		// /s/<server>/api/… is the same API proxied for another server (remotes.go).
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/s/") {
 			// Deliberately omit WWW-Authenticate. Sending it is what makes browsers
 			// open the unreliable native username/password prompt.
 			writeJSONError(w, http.StatusUnauthorized, "authentication required")

@@ -113,6 +113,13 @@ export function onStats(payload) {
   refreshHealth()
 }
 
+// A different server is a different logger: forget the old one's heartbeat.
+export function resetHealth() {
+  health.stats = null
+  lastEventAt = 0
+  refreshHealth()
+}
+
 export function onStreamError() {
   // Don't blank the data here; let the freshness math below decide the verdict
   // so a brief blip doesn't flap the pill.
