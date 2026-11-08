@@ -489,16 +489,34 @@ func logRateLimited(key, format string, args ...any) {
 // scanLogReverse walks a JSONL log newest-first, surfacing (rate-limited) any
 // failure other than the file simply not existing yet. Swallowing these errors
 // made an unreadable log indistinguishable from a quiet network.
+//
+// When fn has not stopped by the start of the file, the walk continues into the
+// previous rotation, <path>.1 (left uncompressed by logrotate's delaycompress):
+// every caller stops at its window's cutoff, so a window that crosses the daily
+// rotation would otherwise silently lose its older part.
 func scanLogReverseContext(ctx context.Context, path string, fn func([]byte) bool) error {
-	err := eachLineReverseContext(ctx, path, fn)
-	if ctxErr := ctx.Err(); ctxErr != nil {
-		return ctxErr
+	stopped := false
+	walk := func(line []byte) bool {
+		if fn(line) {
+			return true
+		}
+		stopped = true
+		return false
 	}
-	if err != nil && !os.IsNotExist(err) {
-		logRateLimited("scan:"+path, "wgflow web: scan %s: %v", path, err)
+	for _, p := range []string{path, path + ".1"} {
+		err := eachLineReverseContext(ctx, p, walk)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if err != nil && !os.IsNotExist(err) {
+			logRateLimited("scan:"+p, "wgflow web: scan %s: %v", p, err)
+		}
+		// Preserve the historical best-effort behavior for missing/unreadable
+		// logs; only request cancellation is actionable by callers.
+		if stopped {
+			break
+		}
 	}
-	// Preserve the historical best-effort behavior for missing/unreadable logs;
-	// only request cancellation is actionable by callers.
 	return nil
 }
 
