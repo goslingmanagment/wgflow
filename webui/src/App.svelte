@@ -1,5 +1,5 @@
 <script>
-  import { onMount } from 'svelte'
+  import { onMount, untrack } from 'svelte'
   import { hhmmssMSK } from './lib/format.js'
   import { maybeAutoRefresh, onStats, onStreamError, refreshHealth, requestRefresh, resetHealth, ui } from './lib/store.svelte.js'
   import { apiURL, loadServers, servers, setServer } from './lib/server.svelte.js'
@@ -55,7 +55,9 @@
   $effect(() => {
     if (!serversReady) return
     const url = apiURL('/api/stats/stream')
-    resetHealth()
+    // untrack: resetHealth reads health.stats, which every event rewrites; tracked,
+    // each event would rerun this effect and reopen the stream.
+    untrack(resetHealth)
     let es
     try {
       es = new EventSource(url)
