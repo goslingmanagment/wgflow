@@ -152,6 +152,12 @@ everywhere" needs no extra setting. The browser's cookies are not forwarded and
 the remotes' session cookies are dropped. A remote that is unreachable or
 rejects the password shows as an error on its pages, not as a login prompt.
 
+The Clients page is the exception to the switcher: with several servers it
+shows every server's devices on one board, each tagged with its server (people
+are merged across servers by name, case-insensitively). A server that does not
+answer is reported above the board while the rest still load. Opening a device
+selects its server for the detail page.
+
 A host without its own logger can serve just the switcher: add `--panel-only`
 (the local server is then left out of the list; `--log-dir`/`--rollup` are not
 read). Put it behind a TLS reverse proxy (`proxy_buffering off` for the
