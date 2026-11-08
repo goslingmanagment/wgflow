@@ -4,6 +4,16 @@ export function errorMessage(e) {
   return e?.message || String(e)
 }
 
+// Promise.allSettled for getJSON: [{ value } | { err }, …] in request order;
+// rejects only when every member failed or the whole request was aborted.
+async function settleAll(urls, signal) {
+  const results = await Promise.allSettled(urls.map((u) => getJSON(u, signal)))
+  if (signal.aborted) throw new DOMException('superseded', 'AbortError')
+  const failed = results.filter((r) => r.status === 'rejected')
+  if (failed.length === results.length) throw failed[0].reason
+  return results.map((r) => (r.status === 'fulfilled' ? { value: r.value } : { err: errorMessage(r.reason) }))
+}
+
 // createResource owns the load-on-tick lifecycle every route used to hand-roll.
 // It fixes three related problems at once:
 //   - a repeated poll for the same URL coalesces with the request already in
@@ -13,7 +23,10 @@ export function errorMessage(e) {
 //   - a failed refresh after successful data marks the page `stale` instead of
 //     blanking it — one bad refresh must never erase a screenful of good data;
 //   - `err` therefore only means "no data at all" (the true can't-load case).
-export function createResource() {
+//
+// settle: an array load keeps the members that answered (see settleAll), so
+// one dead server does not blank the others.
+export function createResource({ settle = false } = {}) {
   let data = $state(null)
   let err = $state(null) // message of the last failed load (null after a success)
   let errStatus = $state(null) // HTTP status of the last failure, when known
@@ -52,9 +65,11 @@ export function createResource() {
     loading = true
     const request = (async () => {
       try {
-        const value = Array.isArray(requestUrls)
-          ? await Promise.all(requestUrls.map((u) => getJSON(u, c.signal)))
-          : await getJSON(requestUrls, c.signal)
+        const value = !Array.isArray(requestUrls)
+          ? await getJSON(requestUrls, c.signal)
+          : settle
+            ? await settleAll(requestUrls, c.signal)
+            : await Promise.all(requestUrls.map((u) => getJSON(u, c.signal)))
         if (id !== seq) return false
         data = value
         err = null

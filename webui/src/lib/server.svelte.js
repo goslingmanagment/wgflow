@@ -43,9 +43,25 @@ export function setServer(name) {
   } catch {}
 }
 
-// apiURL routes an /api/ path to the selected server.
+function serverPath(name, path) {
+  if (!name || name === servers.local) return path
+  return '/s/' + encodeURIComponent(name) + path
+}
+
+// onServer pins an /api/ path to one server regardless of the selection
+// ('@name/api/…'). It stays a plain string so equal requests still compare
+// equal (resource coalescing), and apiURL resolves it at fetch time.
+export function onServer(name, path) {
+  return '@' + encodeURIComponent(name) + path
+}
+
+// apiURL routes an /api/ path to the selected server (or to the server an
+// onServer path names).
 export function apiURL(path) {
-  const cur = servers.current
-  if (!cur || cur === servers.local || !path.startsWith('/api/') || path.startsWith('/api/servers')) return path
-  return '/s/' + encodeURIComponent(cur) + path
+  if (path.startsWith('@')) {
+    const i = path.indexOf('/')
+    return serverPath(decodeURIComponent(path.slice(1, i)), path.slice(i))
+  }
+  if (!path.startsWith('/api/') || path.startsWith('/api/servers')) return path
+  return serverPath(servers.current, path)
 }

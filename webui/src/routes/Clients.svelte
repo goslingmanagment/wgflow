@@ -11,25 +11,53 @@
   import VerdictBadge from '../lib/VerdictBadge.svelte'
   import InfoTip from '../lib/InfoTip.svelte'
   import Srez from '../lib/Srez.svelte'
+  import { onServer, servers, setServer } from '../lib/server.svelte.js'
 
   const EDNS_TIP = 'Клиент использует шифрованный DNS (DoH/DoT) — DNS-журнал неполон, атрибуция доменов может занижаться.'
 
   let search = $state('')
   let sort = $state('total')
   let srezOpen = $state(false)
-  const res = createResource()
+  // Several servers: one board with every server's clients (no switching);
+  // each device carries its server, and opening it selects that server.
+  const multi = servers.list.length > 1
+  const res = createResource({ settle: true })
 
   $effect(() => {
     trackRefreshTick()
-    res.load('/api/clients?since=' + ui.since)
+    const q = '/api/clients?since=' + ui.since
+    res.load(multi ? servers.list.map((s) => onServer(s.name, q)) : q)
   })
-  const data = $derived(res.data)
+
+  // One shape for one or many servers. A server that did not answer is listed
+  // in `failed`; logger/rollup outages are kept per server.
+  const data = $derived.by(() => {
+    const d = res.data
+    if (!d) return null
+    const answers = multi ? d.map((r, i) => ({ server: servers.list[i].name, ...r })) : [{ server: servers.current, value: d }]
+    const out = { clients: [], failed: [], loggerDown: [], dbDown: [] }
+    for (const a of answers) {
+      if (a.err) {
+        out.failed.push({ server: a.server, err: a.err })
+        continue
+      }
+      const loggerOk = a.value.logger_ok !== false
+      if (!loggerOk) out.loggerDown.push(a.server)
+      if (a.value.db_ok === false) out.dbDown.push(a.server)
+      for (const c of a.value.clients || []) out.clients.push({ ...c, server: a.server, loggerOk })
+    }
+    return out
+  })
+  const rowKey = (c) => c.server + '\u0000' + c.name
+  const onList = (list) => (multi && list.length ? ' (' + list.join(', ') + ')' : '')
 
   let manualOpen = $state(new Set())
 
   const rows = $derived.by(() => {
     const needle = search.trim().toLowerCase()
-    let r = (data?.clients || []).filter((c) => !needle || c.name.toLowerCase().includes(needle) || (c.person || '').toLowerCase().includes(needle))
+    let r = (data?.clients || []).filter(
+      (c) => !needle || c.name.toLowerCase().includes(needle) || (c.person || '').toLowerCase().includes(needle) || (multi && c.server.toLowerCase().includes(needle)),
+    )
     r = [...r].sort((a, b) => (sort === 'name' ? a.name.localeCompare(b.name) : b.total - a.total))
     return r
   })
@@ -41,13 +69,18 @@
     const m = {}
     for (const c of rows) {
       const p = c.person || personOf(c.name)
-      if (!m[p]) m[p] = { person: p, devices: [], total: 0, cats: {} }
-      m[p].devices.push(c)
-      m[p].total += c.total
-      for (const x of c.cats || []) m[p].cats[x.category] = (m[p].cats[x.category] || 0) + Number(x.bytes || 0)
+      // Case-insensitive: one server may name a person from clients.yaml
+      // ("Diana") and another from the device prefix ("diana").
+      const k = p.toLowerCase()
+      if (!m[k]) m[k] = { key: k, person: p, devices: [], total: 0, cats: {} }
+      else if (m[k].person === k && p !== k) m[k].person = p
+      m[k].devices.push(c)
+      m[k].total += c.total
+      for (const x of c.cats || []) m[k].cats[x.category] = (m[k].cats[x.category] || 0) + Number(x.bytes || 0)
     }
     return Object.values(m)
       .map((g) => ({
+        key: g.key,
         person: g.person,
         devices: [...g.devices].sort((a, b) => b.total - a.total),
         total: g.total,
@@ -55,12 +88,14 @@
           .map(([category, bytes]) => ({ category, bytes }))
           .sort((a, b) => b.bytes - a.bytes),
         verdict: aggVerdict(g.devices),
+        loggerOk: g.devices.every((d) => d.loggerOk),
+        servers: [...new Set(g.devices.map((d) => d.server))],
         disagree: new Set(g.devices.map((d) => d.verdict?.status)).size > 1,
       }))
       .sort((a, b) => (sort === 'name' ? a.person.localeCompare(b.person) : b.total - a.total))
   })
   function isOpen(g) {
-    return manualOpen.has(g.person) || g.disagree || g.devices.length === 1
+    return manualOpen.has(g.key) || g.disagree || g.devices.length === 1
   }
   function toggle(person) {
     const s = new Set(manualOpen)
@@ -82,7 +117,15 @@
 
 <!-- names as a pre-joined string: a fresh array every refresh would retrigger
      the Срез effect (double /api/snapshot per tick); an equal string doesn't. -->
-<Srez open={srezOpen} onClose={() => (srezOpen = false)} names={(data?.clients || []).map((c) => c.name).join(',')} />
+<!-- Срез reads the selected server, so it gets that server's devices only. -->
+<Srez
+  open={srezOpen}
+  onClose={() => (srezOpen = false)}
+  names={(data?.clients || [])
+    .filter((c) => c.server === servers.current)
+    .map((c) => c.name)
+    .join(',')}
+/>
 
 {#if res.err && !data}
   <p class="err">Couldn't load clients. Is <code>wgflow web</code> running? ({res.err})</p>
@@ -92,28 +135,31 @@
   {#if res.stale}
     <StaleBanner lastUpdatedAt={res.lastUpdatedAt} err={res.err} />
   {/if}
-  {#if data.db_ok === false}
-    <div class="outage" role="alert">⚠ Rollup DB unavailable — verdicts are unknown and totals may be incomplete.</div>
+  {#each data.failed as f (f.server)}
+    <div class="outage" role="alert">⚠ Сервер {f.server} не ответил ({f.err}), его клиентов здесь нет.</div>
+  {/each}
+  {#if data.dbDown.length}
+    <div class="outage" role="alert">⚠ Rollup DB unavailable{onList(data.dbDown)} — verdicts are unknown and totals may be incomplete.</div>
   {/if}
   <div class="cnt">
     <span class="grp">group
       <button class:on={ui.group === 'person'} onclick={() => setGroup('person')}>person</button>
       <button class:on={ui.group === 'device'} onclick={() => setGroup('device')}>device</button>
     </span>
-    {#if ui.group === 'person'}· {grouped.length} people · {rows.length} devices{:else}· {rows.length} seen{/if} · last {ui.since} · classification inferred
+    {#if ui.group === 'person'}· {grouped.length} people · {rows.length} devices{:else}· {rows.length} seen{/if}{#if multi}{' · '}{servers.list.length - data.failed.length} of {servers.list.length} servers{/if} · last {ui.since} · classification inferred
   </div>
-  {#if data.logger_ok === false}
+  {#if data.loggerDown.length}
     <div class="outage" role="alert">
-      ⚠ Логгер не подтверждён — нулевые строки могут быть сбоем, не тишиной. Тишина не доказана; проверьте System.
+      ⚠ Логгер не подтверждён{onList(data.loggerDown)} — нулевые строки могут быть сбоем, не тишиной. Тишина не доказана; проверьте System.
     </div>
   {/if}
 
   {#snippet deviceRow(c, sub)}
-    <a class="row" class:sub href="#/clients/{encodeURIComponent(c.name)}">
+    <a class="row" class:sub href="#/clients/{encodeURIComponent(c.name)}" onclick={() => setServer(c.server)}>
       <div class="nm">
         <span class="dot" style="background:{verdictColor(c.verdict?.status)}"></span>
         <div class="tx">
-          <div class="name">{#if deviceGlyph(c.device_kind)}<span class="dev" title={c.device_kind}>{deviceGlyph(c.device_kind)}</span>{/if}{c.name} <VerdictBadge verdict={c.verdict} loggerOk={data.logger_ok} compact />{#if c.encrypted_dns}
+          <div class="name">{#if deviceGlyph(c.device_kind)}<span class="dev" title={c.device_kind}>{deviceGlyph(c.device_kind)}</span>{/if}{c.name}{#if multi}<span class="srvtag" title="сервер">{c.server}</span>{/if} <VerdictBadge verdict={c.verdict} loggerOk={c.loggerOk} compact />{#if c.encrypted_dns}
               <InfoTip text={EDNS_TIP}><span class="edns">DoH/DoT</span></InfoTip>{/if}</div>
           <!-- «doing now»: the SERVICE label when the server has one, with the raw
                host kept in the tooltip so the label can always be checked. -->
@@ -134,14 +180,14 @@
       <span>{ui.group === 'person' ? 'Person · device' : 'Client · doing now'}</span><span>net</span><span class="r">rate</span><span class="r">volume</span><span>mix</span>
     </div>
     {#if ui.group === 'person'}
-      {#each grouped as g (g.person)}
+      {#each grouped as g (g.key)}
         <div class="pgroup">
-          <button class="phead" onclick={() => toggle(g.person)}>
+          <button class="phead" onclick={() => toggle(g.key)}>
             <div class="nm">
               <span class="dot" style="background:{verdictColor(g.verdict?.status)}"></span>
               <div class="tx">
-                <div class="name"><span class="pname serif">{g.person}</span> <VerdictBadge verdict={g.verdict} loggerOk={data.logger_ok} compact /></div>
-                <div class="site"><span class="muted">{g.devices.length} устр. {g.devices.map((d) => deviceGlyph(d.device_kind)).filter(Boolean).join(' ')}{#if g.disagree} · устройства расходятся{/if}</span></div>
+                <div class="name"><span class="pname serif">{g.person}</span> <VerdictBadge verdict={g.verdict} loggerOk={g.loggerOk} compact /></div>
+                <div class="site"><span class="muted">{g.devices.length} устр. {g.devices.map((d) => deviceGlyph(d.device_kind)).filter(Boolean).join(' ')}{#if multi}{' · ' + g.servers.join(', ')}{/if}{#if g.disagree}{' · устройства расходятся'}{/if}</span></div>
               </div>
             </div>
             <div class="spk caret">{isOpen(g) ? '▾' : '▸'}</div>
@@ -150,13 +196,13 @@
             <div class="mix"><Mix cats={g.cats} /></div>
           </button>
           {#if isOpen(g)}
-            {#each g.devices as c (c.name)}{@render deviceRow(c, true)}{/each}
+            {#each g.devices as c (rowKey(c))}{@render deviceRow(c, true)}{/each}
           {/if}
         </div>
       {/each}
       {#if grouped.length === 0}<p class="dim pad">No clients in this window.</p>{/if}
     {:else}
-      {#each rows as c (c.name)}{@render deviceRow(c, false)}{/each}
+      {#each rows as c (rowKey(c))}{@render deviceRow(c, false)}{/each}
       {#if rows.length === 0}<p class="dim pad">No clients in this window.</p>{/if}
     {/if}
   </div>
@@ -263,6 +309,16 @@
     padding: 9px 12px;
     font-size: 12.5px;
     margin-bottom: 10px;
+  }
+  .srvtag {
+    margin-left: 6px;
+    font-size: 10px;
+    font-weight: 400;
+    padding: 1px 6px;
+    border-radius: 4px;
+    color: var(--color-dim);
+    background: var(--color-s3);
+    white-space: nowrap;
   }
   .dev {
     margin-right: 5px;
