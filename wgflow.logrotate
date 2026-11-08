@@ -2,8 +2,14 @@
     daily
     rotate 14
     compress
+    # Keep yesterday's file plain: wgflow web also reads <log>.1, so a window
+    # that crosses the rotation keeps its older part.
+    delaycompress
     missingok
     notifempty
-    copytruncate
+    # Rotate by rename, not copytruncate (which drops whatever is written
+    # between its copy and its truncate): wgflow serve reopens a renamed log
+    # before its next flush. Needs a wgflow serve that does (see README).
+    create
     maxsize 100M
 }

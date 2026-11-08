@@ -69,6 +69,13 @@ sudo systemctl enable --now wgflow
 sudo systemctl enable --now wgflow-web
 ```
 
+`wgflow.logrotate` rotates the logs daily by rename and keeps yesterday's file
+uncompressed (`<log>.1`). `wgflow serve` reopens a renamed log before its next
+flush, and the panel reads `<log>.1` too, so a 24h window keeps the hours before
+the rotation. Order matters when upgrading a host that still has the old
+`copytruncate` config: an older `wgflow serve` keeps writing into the renamed
+file, so restart `wgflow` on the new binary first, then install this config.
+
 The web UI is embedded in the binary (`webui/dist` is committed), so `go build`
 alone produces a self-contained binary — Node is only needed to rebuild the UI.
 

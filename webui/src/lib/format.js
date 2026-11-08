@@ -4,7 +4,10 @@
 // freeze the whole panel. `signal` (optional) lets callers abort earlier.
 import { apiURL } from './server.svelte.js'
 
-const FETCH_TIMEOUT_MS = 10_000
+// Above the panel's 30s wait for a remote server (remotes.go), so a slow remote
+// surfaces as the panel's own error, and a heavy 24h window on a busy day has
+// time to finish instead of reading as "server did not answer".
+const FETCH_TIMEOUT_MS = 35_000
 let loginRedirectStarted = false
 
 export async function getJSON(url, signal) {

@@ -654,6 +654,13 @@ func serve(args []string) error {
 		case <-reloadTicker.C:
 			reloadSources(false)
 		case now := <-flushTicker.C:
+			for _, l := range []*JSONLogger{flowLog, dnsLog, tlsLog} {
+				if err := l.ReopenIfRotated(); err != nil {
+					// Keep writing to the open file: a failed reopen must not
+					// stop logging. The next flush retries.
+					logRateLimited("reopen:"+l.path, "wgflow: reopen %s: %v", l.path, err)
+				}
+			}
 			flushFlows(now)
 		case <-statsTicker.C:
 			flowMu.Lock()
@@ -782,6 +789,40 @@ func (l *JSONLogger) Write(v any) error {
 		}
 	}
 	return err
+}
+
+// ReopenIfRotated starts a fresh file when the log's path no longer names the
+// open one (logrotate renamed it, or it was deleted). Called before every flush,
+// so records written after a rename land in <log>.1 for at most one flush
+// interval, and the panel reads <log>.1 too. Following the rename is what lets
+// logrotate rotate by rename: copytruncate, the only safe mode before, drops
+// whatever is written between its copy and its truncate.
+func (l *JSONLogger) ReopenIfRotated() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	open, err := l.f.Stat()
+	if err != nil {
+		return err
+	}
+	cur, err := os.Stat(l.path)
+	if err == nil && os.SameFile(open, cur) {
+		return nil
+	}
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	f, err := os.OpenFile(l.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return err
+	}
+	old := l.f
+	l.f = f
+	l.enc = json.NewEncoder(f)
+	if err := old.Close(); err != nil {
+		log.Printf("closing rotated log path=%s err=%v", l.path, err)
+	}
+	log.Printf("log rotated, reopened path=%s", l.path)
+	return nil
 }
 
 func (l *JSONLogger) Close() error {
