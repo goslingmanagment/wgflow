@@ -135,7 +135,10 @@ type apiServers struct {
 }
 
 func (s *webServer) handleServers(w http.ResponseWriter, r *http.Request) {
-	out := apiServers{Servers: []apiServer{{Name: s.name, Local: true}}}
+	out := apiServers{Servers: []apiServer{}}
+	if !s.panelOnly {
+		out.Servers = append(out.Servers, apiServer{Name: s.name, Local: true})
+	}
 	for _, rs := range s.remotes {
 		out.Servers = append(out.Servers, apiServer{Name: rs.name})
 	}

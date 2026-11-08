@@ -91,6 +91,20 @@ func TestRemoteProxy(t *testing.T) {
 	}
 }
 
+func TestPanelOnlyListsRemotes(t *testing.T) {
+	remotes, err := parseRemotes([]string{"a=http://h:1"}, "panel", "pw", func(string) string { return "" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &webServer{name: "panel", remotes: remotes, panelOnly: true}
+	rec := httptest.NewRecorder()
+	s.handleServers(rec, httptest.NewRequest("GET", "/api/servers", nil))
+	var list apiServers
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil || len(list.Servers) != 1 || list.Servers[0].Name != "a" {
+		t.Fatalf("panel-only /api/servers: %s", rec.Body)
+	}
+}
+
 func TestParseRemotesRejects(t *testing.T) {
 	none := func(string) string { return "" }
 	for _, spec := range []string{"noequals", "UP=http://h:1", "x=ftp://h", "x=http://u:p@h:1", "nl3=http://h:1"} {

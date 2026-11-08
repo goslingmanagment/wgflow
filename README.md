@@ -152,6 +152,11 @@ everywhere" needs no extra setting. The browser's cookies are not forwarded and
 the remotes' session cookies are dropped. A remote that is unreachable or
 rejects the password shows as an error on its pages, not as a login prompt.
 
+A host without its own logger can serve just the switcher: add `--panel-only`
+(the local server is then left out of the list; `--log-dir`/`--rollup` are not
+read). Put it behind a TLS reverse proxy (`proxy_buffering off` for the
+`…/api/stats/stream` locations) and listen on 127.0.0.1.
+
 Keep the remotes on the same wgflow version as the panel (or newer): the UI
 calls their API directly. The panel reaches remotes over plain HTTP unless
 their URL is `https://`; restrict the remotes' port to the panel's address if

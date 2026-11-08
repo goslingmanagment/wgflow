@@ -116,6 +116,8 @@ type webServer struct {
 	// servers' panels this one proxies (remotes.go).
 	name    string
 	remotes []*remoteServer
+	// panelOnly: no logger on this host, the switcher lists only the remotes.
+	panelOnly bool
 }
 
 // location returns the day-bucketing time zone. The nil fallback keeps the
@@ -150,6 +152,7 @@ func webCmd(args []string) error {
 	allowNoAuth := fset.Bool("allow-no-auth", false, "serve without a password even on a non-loopback address (dangerous: the whole household's traffic becomes public)")
 	tzName := fset.String("tz", "Europe/Moscow", "IANA time zone for day bucketing (backend only; the frontend still labels hours in MSK)")
 	serverName := fset.String("name", defaultServerName(), "this server's label in the server switcher")
+	panelOnly := fset.Bool("panel-only", false, "no logger on this host: show only the --remote servers")
 	var remoteSpecs remoteFlags
 	fset.Var(&remoteSpecs, "remote", "another server's panel as name=http(s)://host:port, repeatable; password from WGFLOW_REMOTE_PASSWORD_<NAME>, WGFLOW_REMOTE_PASSWORD or this panel's own")
 	if err := fset.Parse(args); err != nil {
@@ -194,12 +197,15 @@ func webCmd(args []string) error {
 	if err != nil {
 		return err
 	}
+	if *panelOnly && len(remotes) == 0 {
+		return fmt.Errorf("--panel-only needs at least one --remote")
+	}
 	if len(remotes) > 0 && *authPassword == "" && !listenIsLoopback(*listen) {
 		// The proxy logs in to the other servers itself: an open panel (--allow-no-auth)
 		// would hand their history to anyone who reaches this one.
 		return fmt.Errorf("--remote on a non-loopback address needs a login password on this panel too (WGFLOW_WEB_PASSWORD)")
 	}
-	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases, loc: loc, name: *serverName, remotes: remotes}
+	s := &webServer{logDir: *logDir, rollupPath: *rollupPath, wgConfig: *wgConfig, iface: *iface, aliases: aliases, loc: loc, name: *serverName, remotes: remotes, panelOnly: *panelOnly}
 	for _, rs := range remotes {
 		log.Printf("remote %s -> %s", rs.name, rs.target.Redacted())
 	}
